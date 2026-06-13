@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interval Training Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#f8f7f4; --panel:#ffffff; --ink:#1f2421; --muted:#6b726c;
+  --teal:#1D9E75; --teal-soft:#e4f3ec; --line:#e7e5e0;
+  --green:#1D9E75; --amber:#e0972a; --red:#d2483b; --blue:#2f73c4; --purple:#7a52c4;
+  --radius:12px;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
+.mono{font-family:'DM Mono',monospace}
+a{color:var(--teal);text-decoration:none}
+button{font-family:inherit;cursor:pointer}
+.app{display:flex;min-height:100vh}
+
+/* Sidebar */
+.sidebar{width:230px;background:var(--panel);border-right:1px solid var(--line);padding:22px 16px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:6px}
+.brand{font-weight:700;font-size:16px;margin-bottom:18px;display:flex;align-items:center;gap:8px}
+.brand .dot{width:10px;height:10px;border-radius:50%;background:var(--teal)}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;color:var(--muted);font-weight:500;border:none;background:none;width:100%;text-align:left;font-size:14px}
+.nav-item:hover{background:var(--bg)}
+.nav-item.active{background:var(--teal-soft);color:var(--teal)}
+.sidebar .spacer{flex:1}
+.side-btn{padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--ink);font-weight:500;width:100%}
+.side-btn.primary{background:var(--teal);color:#fff;border-color:var(--teal)}
+
+/* Main */
+.main{flex:1;padding:28px 34px;max-width:1180px}
+.view{display:none}
+.view.active{display:block}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:26px 0 12px}
+.sub{color:var(--muted);margin:0 0 18px}
+
+/* Cards */
+.grid{display:grid;gap:14px}
+.cards{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+.kpi .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.kpi .value{font-size:26px;font-weight:700;margin-top:6px}
+.kpi .value.mono{font-size:24px}
+.kpi .foot{color:var(--muted);font-size:12px;margin-top:4px}
+.tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
+.tag.track{background:var(--blue)} .tag.easy{background:var(--green)}
+.tag.dist{background:var(--purple)} .tag.time{background:var(--amber)}
+.pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600;background:var(--bg);border:1px solid var(--line)}
+.good{color:var(--green)} .warn{color:var(--amber)} .bad{color:var(--red)}
+.bg-good{background:var(--teal-soft)} .bg-warn{background:#fbf0db} .bg-bad{background:#fae3e0}
+
+/* progress + gauge */
+.bar{height:8px;background:var(--bg);border-radius:6px;overflow:hidden;margin-top:8px}
+.bar > i{display:block;height:100%;background:var(--teal)}
+
+/* tables */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+tr.active-row td{background:var(--panel)}
+tr.recovery-row td{background:#faf9f6;color:var(--muted)}
+tr.wucd-row td{font-style:italic;color:var(--muted)}
+.session-row{cursor:pointer}
+.session-row:hover td{background:var(--teal-soft)}
+
+/* banners */
+.banner{padding:12px 16px;border-radius:10px;margin-bottom:12px;font-weight:500;display:flex;gap:8px;align-items:center}
+.banner.alert{background:#fae3e0;color:var(--red)}
+.banner.caution{background:#fbf0db;color:#9a6a1a}
+
+/* chat */
+.chat{display:flex;flex-direction:column;height:360px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}
+.chat-log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:80%;padding:9px 12px;border-radius:12px;font-size:13px;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:var(--teal);color:#fff}
+.msg.bot{align-self:flex-start;background:var(--bg)}
+.msg.err{align-self:flex-start;background:#fae3e0;color:var(--red)}
+.chat-input{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}
+.chat-input input{flex:1;padding:9px 12px;border:1px solid var(--line);border-radius:9px;font-family:inherit}
+.disclosure{font-size:11px;color:var(--muted);padding:6px 14px}
+
+/* inputs */
+input[type=text],input[type=number]{font-family:inherit;font-size:13px}
+.flagrow{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin:14px 0}
+.flagrow label{display:flex;gap:6px;align-items:center;cursor:pointer}
+.target-input{padding:7px 10px;border:1px solid var(--line);border-radius:8px;width:90px}
+.btn{padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--panel);font-weight:500}
+.btn.primary{background:var(--teal);color:#fff;border-color:var(--teal)}
+
+/* modal */
+.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(20,24,22,.45);align-items:center;justify-content:center;z-index:50}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--panel);border-radius:16px;padding:24px;width:520px;max-width:92vw;max-height:86vh;overflow:auto}
+.dropzone{border:2px dashed var(--line);border-radius:12px;padding:34px;text-align:center;color:var(--muted);margin:14px 0}
+.dropzone.drag{border-color:var(--teal);background:var(--teal-soft)}
+.result-line{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+
+/* toast */
+.toast{position:fixed;bottom:24px;right:24px;background:var(--ink);color:#fff;padding:12px 18px;border-radius:10px;opacity:0;transition:opacity .3s;z-index:60}
+.toast.show{opacity:1}
+
+.empty{text-align:center;color:var(--muted);padding:60px 20px}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.row > *{flex:1;min-width:280px}
+.muted{color:var(--muted)}
+.chart-wrap{position:relative;height:280px}
+.chart-wrap.short{height:200px}
+select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:8px}
+.back{background:none;border:none;color:var(--muted);padding:0;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span> Interval Dashboard</div>
+    <button class="nav-item active" data-view="home">🏠 Home</button>
+    <button class="nav-item" data-view="history">📋 History</button>
+    <button class="nav-item" data-view="weekly">📅 Weekly</button>
+    <div class="spacer"></div>
+    <button class="side-btn primary" id="btn-import">⬆ Import FIT</button>
+    <button class="side-btn" id="btn-scan">🔄 Scan fit_files/</button>
+  </aside>
+
+  <main class="main">
+    <!-- HOME -->
+    <section class="view active" id="view-home">
+      <h1>Home</h1>
+      <p class="sub">This week's load, aerobic progress and recent interval sessions.</p>
+      <div id="home-banners"></div>
+      <div class="grid cards" id="home-cards"></div>
+
+      <h2>HR @ Reference Pace — aerobic progress</h2>
+      <div class="card"><div class="chart-wrap"><canvas id="chart-refpace"></canvas></div>
+        <p class="muted" style="margin:10px 0 0">Mean HR in the 3:55–4:05/km band. A downward trend means the same pace is costing fewer beats — the core signal of aerobic adaptation.</p>
+      </div>
+
+      <div class="row">
+        <div>
+          <h2>Efficiency Factor trend <select id="ef-label-select"></select></h2>
+          <div class="card"><div class="chart-wrap short"><canvas id="chart-ef"></canvas></div></div>
+        </div>
+        <div>
+          <h2>SPS trend</h2>
+          <div class="card"><div class="chart-wrap short"><canvas id="chart-sps"></canvas></div></div>
+        </div>
+      </div>
+
+      <h2>ACWR — acute:chronic workload</h2>
+      <div class="card"><div class="chart-wrap short"><canvas id="chart-acwr"></canvas></div>
+        <p class="muted" style="margin:10px 0 0">Sweet spot 0.8–1.3 (shaded). Above 1.5 = injury-risk red zone.</p>
+      </div>
+
+      <h2>Recent interval sessions</h2>
+      <div id="home-recent"></div>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="view" id="view-history">
+      <h1>History</h1>
+      <p class="sub">All imported sessions, newest first.</p>
+      <div class="flagrow">
+        <select id="filter-type"><option value="">All types</option><option value="interval">Interval</option><option value="easy">Easy</option><option value="track">Track</option></select>
+        <select id="filter-itype"><option value="">All interval types</option><option value="distance">Distance-based</option><option value="time">Time-based</option></select>
+      </div>
+      <div class="card" id="history-list"></div>
+    </section>
+
+    <!-- SESSION DETAIL -->
+    <section class="view" id="view-session">
+      <button class="back" id="session-back">← Back</button>
+      <div id="session-body"></div>
+    </section>
+
+    <!-- WEEKLY -->
+    <section class="view" id="view-weekly">
+      <h1>Weekly Report</h1>
+      <p class="sub" id="weekly-range"></p>
+      <div id="weekly-banner"></div>
+      <div class="grid cards" id="weekly-cards"></div>
+      <div class="row">
+        <div><h2>Daily volume (interval vs easy)</h2><div class="card"><div class="chart-wrap short"><canvas id="chart-daily"></canvas></div></div></div>
+        <div><h2>Rolling weekly volume</h2><div class="card"><div class="chart-wrap short"><canvas id="chart-rolling"></canvas></div></div></div>
+      </div>
+      <h2>Sessions this period</h2>
+      <div class="card" id="weekly-sessions"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Import modal -->
+<div class="modal-backdrop" id="import-modal">
+  <div class="modal">
+    <h2 style="margin-top:0">Import FIT files</h2>
+    <div class="dropzone" id="dropzone">Drag & drop .fit files here<br><span class="muted">or</span><br><button class="btn" id="browse-btn">Browse…</button>
+      <input type="file" id="file-input" accept=".fit" multiple hidden>
+    </div>
+    <div id="import-results"></div>
+    <div style="text-align:right;margin-top:14px"><button class="btn" id="close-import">Close</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const charts={};
+let SESSIONS=[], WEEKLY=null;
+
+function destroyChart(k){ if(charts[k]){charts[k].destroy(); delete charts[k];} }
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
+function fmtKm(v){ return v==null?'—':v.toFixed(1); }
+function num(v,d=1){ return v==null?'—':(typeof v==='number'?v.toFixed(d):v); }
+
+// ── navigation ──────────────────────────────────────────────────────
+function show(view){
+  $$('.view').forEach(v=>v.classList.remove('active'));
+  $('#view-'+view).classList.add('active');
+  $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===view));
+}
+$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); });
+
+// ── data load ───────────────────────────────────────────────────────
+async function loadSessions(){ SESSIONS=await (await fetch('/api/sessions')).json(); }
+async function loadWeekly(){ WEEKLY=await (await fetch('/api/weekly')).json(); }
+
+async function refreshAll(){ await Promise.all([loadSessions(), loadWeekly()]); renderHome(); }
+
+// ── badges ──────────────────────────────────────────────────────────
+function badges(s){
+  let h='';
+  if(s.track) h+='<span class="tag track">Track</span> ';
+  if(s.easy) h+='<span class="tag easy">Easy</span> ';
+  else if(s.itype==='distance') h+='<span class="tag dist">Distance</span> ';
+  else if(s.itype==='time') h+='<span class="tag time">Time</span> ';
+  return h;
+}
+
+// ── HOME ────────────────────────────────────────────────────────────
+function renderHome(){
+  const main=$('#home-cards');
+  if(!SESSIONS.length){
+    $('#home-banners').innerHTML='';
+    main.innerHTML='<div class="empty card" style="grid-column:1/-1">No sessions yet. Click <b>Import FIT</b> or drop files in <code>fit_files/</code> and <b>Scan</b>.</div>';
+    $('#home-recent').innerHTML='';
+    ['refpace','ef','sps','acwr'].forEach(destroyChart);
+    return;
+  }
+  const weeks=(WEEKLY&&WEEKLY.weeks)||[];
+  const wk=weeks.length?weeks[weeks.length-1]:null;
+  const target=70;
+  // banners
+  let b='';
+  if(wk&&wk.wow_alert) b+=`<div class="banner alert">⚠ Weekly volume up ${num(wk.wow_km_pct)}% vs last week (>10%).</div>`;
+  if(wk&&wk.acwr_status==='alert') b+=`<div class="banner alert">⚠ ACWR ${num(wk.acwr,2)} — injury-risk red zone (>1.5).</div>`;
+  else if(wk&&wk.acwr_status==='caution') b+=`<div class="banner caution">ACWR ${num(wk.acwr,2)} — outside the 0.8–1.3 sweet spot.</div>`;
+  $('#home-banners').innerHTML=b;
+  // cards
+  const cards=[
+    ['This week km', wk?fmtKm(wk.total_km):'—', `target ${target} km`, wk?Math.min(100,wk.total_km/target*100):0],
+    ['Sessions', wk?wk.session_count:'—', wk?`${wk.interval_count} interval · ${wk.easy_count} easy`:''],
+    ['Weekly EF (easy)', wk?num(wk.weekly_ef,3):'—', 'rising = aerobic gain'],
+    ['Easy ratio', wk&&wk.easy_ratio!=null?num(wk.easy_ratio)+'%':'—', wk?`80/20 check (${wk.easy_ratio_basis})`:''],
+    ['Weekly TRIMP', wk?num(wk.trimp):'—', 'intensity load'],
+    ['ACWR', wk&&wk.acwr!=null?num(wk.acwr,2):'—', '0.8–1.3 sweet spot'],
+  ];
+  main.innerHTML=cards.map(c=>`<div class="card kpi"><div class="label">${c[0]}</div><div class="value mono">${c[1]}</div>${c[2]?`<div class="foot">${c[2]}</div>`:''}${c[3]!=null?`<div class="bar"><i style="width:${c[3]}%"></i></div>`:''}</div>`).join('');
+
+  renderRefPaceChart();
+  setupEfSelector();
+  renderSpsChart();
+  renderAcwrChart();
+
+  const recent=SESSIONS.filter(s=>!s.easy).slice(0,3);
+  $('#home-recent').innerHTML = recent.length? tableSessions(recent) : '<div class="card muted">No interval sessions yet.</div>';
+}
+
+function renderRefPaceChart(){
+  destroyChart('refpace');
+  const pts=SESSIONS.filter(s=>s.hr_at_ref_pace!=null).slice().reverse();
+  const ctx=$('#chart-refpace');
+  if(!pts.length){ ctx.parentElement.innerHTML='<p class="muted">No sessions yet with ≥3 min in the 3:55–4:05/km band.</p>'; return; }
+  charts.refpace=new Chart(ctx,{type:'line',data:{labels:pts.map(p=>p.date),
+    datasets:[{label:'HR @ ref pace (bpm)',data:pts.map(p=>p.hr_at_ref_pace),borderColor:'#1D9E75',backgroundColor:'#e4f3ec',tension:.3,fill:true,pointRadius:4}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{title:{display:true,text:'bpm'}}}}});
+}
+
+function setupEfSelector(){
+  const labels=[...new Set(SESSIONS.filter(s=>!s.easy&&s.label).map(s=>s.label))];
+  const sel=$('#ef-label-select');
+  sel.innerHTML=labels.map(l=>`<option>${l}</option>`).join('')||'<option>—</option>';
+  sel.onchange=renderEfChart;
+  renderEfChart();
+}
+function renderEfChart(){
+  destroyChart('ef');
+  const label=$('#ef-label-select').value;
+  const pts=SESSIONS.filter(s=>!s.easy&&s.label===label&&s.ef!=null).slice().reverse();
+  charts.ef=new Chart($('#chart-ef'),{type:'line',data:{labels:pts.map(p=>p.date),
+    datasets:[{label:'EF',data:pts.map(p=>p.ef),borderColor:'#2f73c4',tension:.3,pointRadius:4}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+}
+function renderSpsChart(){
+  destroyChart('sps');
+  const pts=SESSIONS.filter(s=>!s.easy&&(s.sps_t!=null||s.sps_i!=null)).slice().reverse();
+  charts.sps=new Chart($('#chart-sps'),{type:'line',data:{labels:pts.map(p=>p.date),
+    datasets:[{label:'SPS',data:pts.map(p=>p.sps_t??p.sps_i),borderColor:'#7a52c4',tension:.3,pointRadius:4}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}});
+}
+function renderAcwrChart(){
+  destroyChart('acwr');
+  const weeks=(WEEKLY&&WEEKLY.weeks)||[];
+  charts.acwr=new Chart($('#chart-acwr'),{type:'line',data:{labels:weeks.map(w=>w.label),
+    datasets:[{label:'ACWR',data:weeks.map(w=>w.acwr),borderColor:'#e0972a',tension:.3,pointRadius:4,
+      segment:{}, spanGaps:true}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false},
+      annotation:false},
+      scales:{y:{min:0,suggestedMax:2,title:{display:true,text:'ratio'}}}}});
+  // draw sweet-spot band manually via a plugin-free overlay dataset
+}
+
+// ── HISTORY ─────────────────────────────────────────────────────────
+function tableSessions(list){
+  return `<table><thead><tr><th>Date</th><th>Session</th><th>km</th><th>Avg HR</th><th>SPS</th></tr></thead><tbody>${
+    list.map(s=>`<tr class="session-row" data-id="${s.id}"><td>${s.date}</td><td>${badges(s)} ${s.label||''}</td><td>${fmtKm(s.km)}</td><td>${num(s.avg_hr,0)}</td><td><span class="pill">${s.sps_t??s.sps_i??'—'}</span></td></tr>`).join('')
+  }</tbody></table>`;
+}
+function renderHistory(){
+  const t=$('#filter-type').value, it=$('#filter-itype').value;
+  let list=SESSIONS.slice();
+  if(t==='interval') list=list.filter(s=>!s.easy);
+  if(t==='easy') list=list.filter(s=>s.easy);
+  if(t==='track') list=list.filter(s=>s.track);
+  if(it) list=list.filter(s=>s.itype===it);
+  $('#history-list').innerHTML=list.length?tableSessions(list):'<div class="empty">No sessions match.</div>';
+}
+$('#filter-type').onchange=renderHistory; $('#filter-itype').onchange=renderHistory;
+
+// delegate row clicks
+document.addEventListener('click',e=>{
+  const row=e.target.closest('.session-row');
+  if(row) openSession(row.dataset.id);
+});
+
+// ── SESSION DETAIL ──────────────────────────────────────────────────
+let CURRENT=null, CHAT_HISTORY=[];
+async function openSession(id){
+  const s=await (await fetch('/api/sessions/'+id)).json();
+  CURRENT=s; CHAT_HISTORY=[];
+  show('session');
+  renderSession(s);
+}
+$('#session-back').onclick=()=>{ show('home'); renderHome(); };
+
+function kpiCard(label,value,foot,cls){ return `<div class="card kpi"><div class="label">${label}</div><div class="value mono ${cls||''}">${value}</div>${foot?`<div class="foot">${foot}</div>`:''}</div>`; }
+
+function renderSession(s){
+  const warn=(s.warnings||[]).map(w=>`<div class="banner caution">⚠ ${w}</div>`).join('');
+  const isInterval=!s.easy;
+  let kpis='';
+  kpis+=kpiCard('EF', num(s.ef,3), 'higher = better');
+  if(s.easy){
+    kpis+=kpiCard('Decoupling', s.decoupling!=null?num(s.decoupling)+'%':'—','<5% good', decoupClass(s.decoupling));
+  } else {
+    kpis+=kpiCard('Pace Fade', s.pace_fade!=null?num(s.pace_fade)+'%':'—','last vs first rep', s.pace_fade>2?'bad':'good');
+    kpis+=kpiCard('Pace CV', s.pace_cv!=null?num(s.pace_cv)+'%':'—','<2% even', s.pace_cv>2?'warn':'good');
+    kpis+=kpiCard('HRR60 avg', s.hrr60_avg!=null?num(s.hrr60_avg)+' bpm':(s.rqs_avg!=null?'RQS '+num(s.rqs_avg)+'%':'—'),'recovery', s.hrr60_avg!=null?(s.hrr60_avg>=25?'good':s.hrr60_avg>=15?'warn':'bad'):'');
+    kpis+=kpiCard('SPS-I', num(s.sps_i,0),'inferred target');
+    kpis+=kpiCard('SPS-T', s.sps_t!=null?num(s.sps_t,0):'—','set a target →');
+  }
+  kpis+=kpiCard('HR @ ref pace', s.hr_at_ref_pace!=null?num(s.hr_at_ref_pace,0)+' bpm':'—','3:55–4:05/km');
+
+  const decoupPanel = s.easy ? `
+    <h2>Aerobic decoupling</h2>
+    <div class="card"><p>First-half vs second-half efficiency drift: <b class="${decoupClass(s.decoupling)}">${s.decoupling!=null?num(s.decoupling)+'%':'—'}</b>. Below 5% indicates a well-controlled steady effort.</p></div>` : '';
+
+  $('#session-body').innerHTML=`
+    ${warn}
+    <h1>${s.label||'Session'}</h1>
+    <p class="sub">${badges(s)} ${s.date} · ${fmtKm(s.km)} km · ${s.duration_fmt} · avg HR ${num(s.avg_hr,0)}</p>
+    <div class="flagrow">
+      <label><input type="checkbox" id="flag-easy" ${s.easy?'checked':''}> Easy run</label>
+      <label><input type="checkbox" id="flag-track" ${s.track?'checked':''}> Track session</label>
+      <label>Theoretical target <input class="target-input" id="flag-target" placeholder="${s.itype==='time'?'mm:ss dur':'mm:ss /km'}" value="${s.theoretical_target||''}"></label>
+      <a class="btn" href="/api/sessions/${s.id}/export.csv">⬇ Export CSV</a>
+    </div>
+    <div class="grid cards">${kpis}</div>
+
+    <h2>Heart rate over time</h2>
+    <div class="card"><div class="chart-wrap"><canvas id="chart-hr"></canvas></div></div>
+
+    ${decoupPanel}
+
+    ${isInterval?`<h2>Lap Score</h2><div class="card"><div class="chart-wrap short"><canvas id="chart-lapscore"></canvas></div></div>`:''}
+
+    ${isInterval?`<h2>Laps</h2><div class="card" style="overflow-x:auto">${lapTable(s)}</div>`:''}
+
+    <h2>AI coach</h2>
+    <div class="chat">
+      <div class="chat-log" id="chat-log"><div class="msg bot">Ask me about this session — pacing, recovery, how it compares to recent efforts.</div></div>
+      <div class="disclosure">Your session data is sent to the AI provider to generate this response.</div>
+      <div class="chat-input"><input id="chat-text" placeholder="e.g. How even was my pacing?"><button class="btn primary" id="chat-send">Send</button><button class="btn" id="chat-clear">Clear</button></div>
+    </div>
+  `;
+
+  // flag handlers
+  $('#flag-easy').onchange=patchFlags; $('#flag-track').onchange=patchFlags;
+  $('#flag-target').onchange=patchFlags;
+  renderHrChart(s);
+  if(isInterval) renderLapScoreChart(s);
+  $('#chat-send').onclick=sendChat;
+  $('#chat-text').addEventListener('keydown',e=>{ if(e.key==='Enter') sendChat(); });
+  $('#chat-clear').onclick=()=>{ CHAT_HISTORY=[]; $('#chat-log').innerHTML='<div class="msg bot">Conversation cleared.</div>'; };
+}
+function decoupClass(d){ return d==null?'':(d<5?'good':d<8?'warn':'bad'); }
+
+async function patchFlags(){
+  const body={ easy:$('#flag-easy').checked, track:$('#flag-track').checked, theoretical_target:$('#flag-target').value||null };
+  const s=await (await fetch('/api/sessions/'+CURRENT.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  CURRENT=s; renderSession(s);
+  await loadSessions(); await loadWeekly();
+}
+
+function lapTable(s){
+  const rows=s.laps.map(l=>{
+    const cls=l.type==='active'?'active-row':l.type==='recovery'?'recovery-row':'wucd-row';
+    const label = l.type==='active'?('Rep '+l.rep):l.type==='recovery'?'recovery':l.type.toUpperCase();
+    const dist = l.distance_std?`${l.distance_std} m`:`${Math.round(l.distance_m)} m`;
+    return `<tr class="${cls}"><td>${label}</td><td>${dist}</td><td>${Math.round(l.duration_s)}s</td><td class="mono">${l.pace_fmt||'—'}</td><td>${num(l.hr_avg,0)}</td><td>${l.ea??'—'}</td><td>${l.cardiac_cost??'—'}</td><td>${l.hrr60??(l.rqs!=null?l.rqs+'%':'—')}</td><td>${l.delta_t??'—'}</td><td>${l.delta_i??'—'}</td><td>${l.lap_score??'—'}</td></tr>`;
+  }).join('');
+  return `<table><thead><tr><th>Lap</th><th>Dist</th><th>Time</th><th>Pace</th><th>HR</th><th>EA</th><th>Card.cost</th><th>HRR60/RQS</th><th>Δ tgt</th><th>Δ inf</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderHrChart(s){
+  destroyChart('hr');
+  const tr=s.hr_trace||[];
+  if(!tr.length){ $('#chart-hr').parentElement.innerHTML='<p class="muted">No second-by-second HR trace in this file.</p>'; return; }
+  // lap boundary annotations as vertical marks via a second dataset
+  charts.hr=new Chart($('#chart-hr'),{type:'line',data:{labels:tr.map(p=>(p.t/60).toFixed(1)),
+    datasets:[{label:'HR (bpm)',data:tr.map(p=>p.hr),borderColor:'#d2483b',backgroundColor:'#fae3e0',tension:.2,pointRadius:0,fill:true,borderWidth:2}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{title:{display:true,text:'minutes'},ticks:{maxTicksLimit:12}},y:{title:{display:true,text:'bpm'}}}}});
+}
+function renderLapScoreChart(s){
+  destroyChart('lapscore');
+  const reps=s.laps.filter(l=>l.type==='active');
+  charts.lapscore=new Chart($('#chart-lapscore'),{type:'bar',data:{labels:reps.map(l=>'R'+l.rep),
+    datasets:[{label:'Lap score',data:reps.map(l=>l.lap_score),backgroundColor:'#1D9E75'}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}});
+}
+
+// ── chat ────────────────────────────────────────────────────────────
+async function sendChat(){
+  const inp=$('#chat-text'); const text=inp.value.trim(); if(!text) return;
+  const log=$('#chat-log');
+  log.innerHTML+=`<div class="msg user">${escapeHtml(text)}</div>`;
+  inp.value=''; log.scrollTop=log.scrollHeight;
+  const thinking=document.createElement('div'); thinking.className='msg bot'; thinking.textContent='…'; log.appendChild(thinking); log.scrollTop=log.scrollHeight;
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:CURRENT.id,message:text,history:CHAT_HISTORY})});
+    const data=await r.json();
+    if(!r.ok){ thinking.className='msg err'; thinking.textContent=data.error||'AI request failed'; return; }
+    thinking.textContent=data.reply;
+    CHAT_HISTORY.push({role:'user',content:text},{role:'assistant',content:data.reply});
+  }catch(err){ thinking.className='msg err'; thinking.textContent='Network error.'; }
+  log.scrollTop=log.scrollHeight;
+}
+function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// ── WEEKLY ──────────────────────────────────────────────────────────
+function renderWeekly(){
+  const weeks=(WEEKLY&&WEEKLY.weeks)||[];
+  const withData=weeks.filter(w=>w.session_count>0);
+  if(!withData.length){ $('#weekly-cards').innerHTML='<div class="empty card" style="grid-column:1/-1">No data yet.</div>'; $('#weekly-range').textContent=''; $('#weekly-sessions').innerHTML=''; $('#weekly-banner').innerHTML=''; ['daily','rolling'].forEach(destroyChart); return; }
+  const wk=withData[withData.length-1];
+  $('#weekly-range').textContent=`Latest week starting ${wk.week_start} (Mon–Sun)`;
+  $('#weekly-banner').innerHTML = wk.wow_alert? `<div class="banner alert">⚠ Volume +${num(wk.wow_km_pct)}% week-on-week (>10% — back off).</div>`:'';
+  const arrow=(v)=>v==null?'':(v>0?`<span class="bad">▲${num(v)}%</span>`:`<span class="good">▼${num(Math.abs(v))}%</span>`);
+  const cards=[
+    ['Total km', fmtKm(wk.total_km), arrow(wk.wow_km_pct)],
+    ['Sessions', wk.session_count, `${wk.interval_count} int · ${wk.easy_count} easy`],
+    ['Avg HR', num(wk.avg_hr,0), 'duration-weighted'],
+    ['Weekly EF (easy)', num(wk.weekly_ef,3), 'rising = gain'],
+    ['Quality volume', fmtKm(wk.quality_volume_km)+' km', 'active-lap distance'],
+    ['Weekly SPS', num(wk.weekly_sps), '>70 target'],
+    ['Easy ratio', wk.easy_ratio!=null?num(wk.easy_ratio)+'%':'—', `≥75% (${wk.easy_ratio_basis})`],
+    ['TRIMP', num(wk.trimp), 'Edwards load'],
+    ['ACWR', wk.acwr!=null?num(wk.acwr,2):'—', acwrText(wk.acwr_status)],
+  ];
+  $('#weekly-cards').innerHTML=cards.map(c=>`<div class="card kpi"><div class="label">${c[0]}</div><div class="value mono">${c[1]}</div><div class="foot">${c[2]}</div></div>`).join('');
+  renderDailyChart(wk); renderRollingChart(withData);
+  $('#weekly-sessions').innerHTML=tableSessions(SESSIONS.filter(s=>{ const m=s.date_iso; return m>=wk.week_start && m<=isoAdd(wk.week_start,6); }));
+}
+function acwrText(st){ return st==='good'?'in sweet spot':st==='caution'?'outside 0.8–1.3':st==='alert'?'red zone':'—'; }
+function isoAdd(iso,days){ const d=new Date(iso); d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
+
+function renderDailyChart(wk){
+  destroyChart('daily');
+  const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const interval=Array(7).fill(0), easy=Array(7).fill(0);
+  Object.entries(wk.daily_km||{}).forEach(([iso,v])=>{ const d=(new Date(iso).getDay()+6)%7; interval[d]+=v.interval; easy[d]+=v.easy; });
+  charts.daily=new Chart($('#chart-daily'),{type:'bar',data:{labels:days,datasets:[
+    {label:'Interval',data:interval,backgroundColor:'#1D9E75'},
+    {label:'Easy',data:easy,backgroundColor:'#9cc9b6'}]},
+    options:{maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true,title:{display:true,text:'km'}}}}});
+}
+function renderRollingChart(weeks){
+  destroyChart('rolling');
+  charts.rolling=new Chart($('#chart-rolling'),{type:'line',data:{labels:weeks.map(w=>w.label),
+    datasets:[{label:'km',data:weeks.map(w=>w.total_km),borderColor:'#1D9E75',backgroundColor:'#e4f3ec',fill:true,tension:.3,pointRadius:4}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{title:{display:true,text:'km'}}}}});
+}
+
+// ── IMPORT ──────────────────────────────────────────────────────────
+const modal=$('#import-modal');
+$('#btn-import').onclick=()=>{ $('#import-results').innerHTML=''; modal.classList.add('open'); };
+$('#close-import').onclick=()=>modal.classList.remove('open');
+modal.addEventListener('click',e=>{ if(e.target===modal) modal.classList.remove('open'); });
+$('#browse-btn').onclick=()=>$('#file-input').click();
+$('#file-input').onchange=e=>uploadFiles(e.target.files);
+const dz=$('#dropzone');
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
+dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));
+
+async function uploadFiles(files){
+  if(!files||!files.length) return;
+  const fd=new FormData();
+  [...files].forEach(f=>fd.append('files[]',f));
+  $('#import-results').innerHTML='<p class="muted">Uploading…</p>';
+  const data=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
+  $('#import-results').innerHTML=(data.results||[]).map(r=>{
+    const ok=r.status==='ok'; const dup=r.status==='duplicate';
+    const cls=ok?'good':dup?'warn':'bad';
+    return `<div class="result-line"><span>${r.file}</span><span class="${cls}">${r.status}</span></div>`;
+  }).join('')||`<p class="bad">${data.error||'Upload failed'}</p>`;
+  await refreshAll();
+}
+
+$('#btn-scan').onclick=async()=>{
+  const data=await (await fetch('/api/scan',{method:'POST'})).json();
+  toast(`Scan: ${data.added.length} added, ${data.skipped.length} skipped, ${data.errors.length} errors`);
+  await refreshAll();
+};
+
+// ── boot ────────────────────────────────────────────────────────────
+refreshAll();
+</script>
+</body>
+</html>
