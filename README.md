@@ -68,8 +68,10 @@ L'architettura non lo preclude (container cron che esegue `garmin_sync.py` ogni 
 ## Uso
 
 - **Tag sessione:** in dettaglio sessione puoi marcare **Easy run** (disattiva i KPI per-lap, esclude dalle viste ripetute) e **Track session** (arrotondamento distanze stretto). Puoi inserire un **target teorico** per popolare SPS-T e i delta per-lap. Ogni modifica ricalcola subito i KPI.
-- **Home:** carico della settimana, trend HR @ ritmo di riferimento (il tracker del progresso aerobico), trend EF per tipo di sessione, trend SPS, indicatore ACWR.
+- **Home:** carico della settimana, trend HR @ ritmo di riferimento (il tracker del progresso aerobico), trend EF per tipo di sessione, trend SPS, indicatore ACWR e la suite completa di alert (volume, ACWR, easy ratio, SPS, pace fade, HRR60, decoupling).
+- **Compare:** scegli una sessione di riferimento; le sessioni con la stessa etichetta (o time-based entro ±1 min) vengono auto-selezionate. Grafici sovrapposti per ripetuta (ritmo, HR, EA, Lap Score) e tabella delta con frecce.
 - **Weekly:** totali Lun–Dom, volume giornaliero, TRIMP, ACWR, alert se l'aumento settimanale supera il +10%.
+- **Chat AI:** le risposte arrivano in streaming token-per-token (SSE).
 
 ## Struttura
 

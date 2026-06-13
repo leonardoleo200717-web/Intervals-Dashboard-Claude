@@ -122,6 +122,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
     <div class="brand"><span class="dot"></span> Interval Dashboard</div>
     <button class="nav-item active" data-view="home">🏠 Home</button>
     <button class="nav-item" data-view="history">📋 History</button>
+    <button class="nav-item" data-view="compare">🔬 Compare</button>
     <button class="nav-item" data-view="weekly">📅 Weekly</button>
     <div class="spacer"></div>
     <button class="side-btn primary" id="btn-import">⬆ Import FIT</button>
@@ -172,6 +173,17 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
       <div class="card" id="history-list"></div>
     </section>
 
+    <!-- COMPARE -->
+    <section class="view" id="view-compare">
+      <h1>Compare sessions</h1>
+      <p class="sub">Pick a reference session; matching sessions (same label, or time-based within ±1 min) are auto-selected. Overlay charts compare rep-by-rep.</p>
+      <div class="flagrow">
+        <label>Reference <select id="compare-ref"></select></label>
+      </div>
+      <div class="card" id="compare-candidates"></div>
+      <div id="compare-output"></div>
+    </section>
+
     <!-- SESSION DETAIL -->
     <section class="view" id="view-session">
       <button class="back" id="session-back">← Back</button>
@@ -211,7 +223,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const charts={};
-let SESSIONS=[], WEEKLY=null;
+let SESSIONS=[], WEEKLY=null, ALERTS=[];
 
 function destroyChart(k){ if(charts[k]){charts[k].destroy(); delete charts[k];} }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
@@ -224,13 +236,14 @@ function show(view){
   $('#view-'+view).classList.add('active');
   $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===view));
 }
-$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); });
+$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); });
 
 // ── data load ───────────────────────────────────────────────────────
 async function loadSessions(){ SESSIONS=await (await fetch('/api/sessions')).json(); }
 async function loadWeekly(){ WEEKLY=await (await fetch('/api/weekly')).json(); }
+async function loadAlerts(){ try{ ALERTS=(await (await fetch('/api/alerts')).json()).alerts||[]; }catch(e){ ALERTS=[]; } }
 
-async function refreshAll(){ await Promise.all([loadSessions(), loadWeekly()]); renderHome(); }
+async function refreshAll(){ await Promise.all([loadSessions(), loadWeekly(), loadAlerts()]); renderHome(); }
 
 // ── badges ──────────────────────────────────────────────────────────
 function badges(s){
@@ -255,12 +268,10 @@ function renderHome(){
   const weeks=(WEEKLY&&WEEKLY.weeks)||[];
   const wk=weeks.length?weeks[weeks.length-1]:null;
   const target=70;
-  // banners
-  let b='';
-  if(wk&&wk.wow_alert) b+=`<div class="banner alert">⚠ Weekly volume up ${num(wk.wow_km_pct)}% vs last week (>10%).</div>`;
-  if(wk&&wk.acwr_status==='alert') b+=`<div class="banner alert">⚠ ACWR ${num(wk.acwr,2)} — injury-risk red zone (>1.5).</div>`;
-  else if(wk&&wk.acwr_status==='caution') b+=`<div class="banner caution">ACWR ${num(wk.acwr,2)} — outside the 0.8–1.3 sweet spot.</div>`;
-  $('#home-banners').innerHTML=b;
+  // alert banner suite (computed server-side from config thresholds)
+  $('#home-banners').innerHTML = ALERTS.length
+    ? ALERTS.map(a=>`<div class="banner ${a.level}">${a.level==='alert'?'⚠':'⚑'} ${a.message}</div>`).join('')
+    : '<div class="banner caution" style="background:var(--teal-soft);color:var(--teal)">✓ No active alerts — load and recovery look balanced.</div>';
   // cards
   const cards=[
     ['This week km', wk?fmtKm(wk.total_km):'—', `target ${target} km`, wk?Math.min(100,wk.total_km/target*100):0],
@@ -424,7 +435,7 @@ async function patchFlags(){
   const body={ easy:$('#flag-easy').checked, track:$('#flag-track').checked, theoretical_target:$('#flag-target').value||null };
   const s=await (await fetch('/api/sessions/'+CURRENT.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   CURRENT=s; renderSession(s);
-  await loadSessions(); await loadWeekly();
+  await Promise.all([loadSessions(), loadWeekly(), loadAlerts()]);
 }
 
 function lapTable(s){
@@ -455,24 +466,118 @@ function renderLapScoreChart(s){
     options:{maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}});
 }
 
-// ── chat ────────────────────────────────────────────────────────────
+// ── chat (SSE streaming) ────────────────────────────────────────────
 async function sendChat(){
   const inp=$('#chat-text'); const text=inp.value.trim(); if(!text) return;
   const log=$('#chat-log');
   log.innerHTML+=`<div class="msg user">${escapeHtml(text)}</div>`;
   inp.value=''; log.scrollTop=log.scrollHeight;
-  const thinking=document.createElement('div'); thinking.className='msg bot'; thinking.textContent='…'; log.appendChild(thinking); log.scrollTop=log.scrollHeight;
+  const bot=document.createElement('div'); bot.className='msg bot'; bot.textContent='…'; log.appendChild(bot); log.scrollTop=log.scrollHeight;
+  let reply='';
   try{
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:CURRENT.id,message:text,history:CHAT_HISTORY})});
-    const data=await r.json();
-    if(!r.ok){ thinking.className='msg err'; thinking.textContent=data.error||'AI request failed'; return; }
-    thinking.textContent=data.reply;
-    CHAT_HISTORY.push({role:'user',content:text},{role:'assistant',content:data.reply});
-  }catch(err){ thinking.className='msg err'; thinking.textContent='Network error.'; }
+    if(!r.ok){ const data=await r.json().catch(()=>({})); bot.className='msg err'; bot.textContent=data.error||'AI request failed'; return; }
+    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    while(true){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      let idx;
+      while((idx=buf.indexOf('\n\n'))>=0){
+        const line=buf.slice(0,idx).trim(); buf=buf.slice(idx+2);
+        if(!line.startsWith('data:')) continue;
+        const evt=JSON.parse(line.slice(5).trim());
+        if(evt.error){ bot.className='msg err'; bot.textContent=evt.error; return; }
+        if(evt.delta){ reply+=evt.delta; bot.textContent=reply; log.scrollTop=log.scrollHeight; }
+      }
+    }
+    if(!reply){ bot.textContent='(no response)'; return; }
+    CHAT_HISTORY.push({role:'user',content:text},{role:'assistant',content:reply});
+  }catch(err){ bot.className='msg err'; bot.textContent='Network error.'; }
   log.scrollTop=log.scrollHeight;
 }
 function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// ── COMPARE ─────────────────────────────────────────────────────────
+const CMP_COLORS=['#1D9E75','#2f73c4','#7a52c4','#e0972a'];
+function compareCandidates(ref){
+  return SESSIONS.filter(s=>{
+    if(s.id===ref.id||s.easy) return false;
+    if(s.itype==='time'&&ref.itype==='time'){
+      return Math.abs((s.duration_s||0)-(ref.duration_s||0))<=60 || s.label===ref.label;
+    }
+    return s.label===ref.label;
+  });
+}
+function renderCompareSetup(){
+  const intervals=SESSIONS.filter(s=>!s.easy);
+  const sel=$('#compare-ref');
+  if(!intervals.length){ $('#compare-candidates').innerHTML='<div class="empty">Need at least one interval session to compare.</div>'; $('#compare-output').innerHTML=''; sel.innerHTML=''; return; }
+  sel.innerHTML=intervals.map(s=>`<option value="${s.id}">${s.date} — ${s.label}</option>`).join('');
+  sel.onchange=renderCompareCandidates;
+  renderCompareCandidates();
+}
+function renderCompareCandidates(){
+  const ref=SESSIONS.find(s=>s.id===$('#compare-ref').value);
+  const cands=compareCandidates(ref);
+  if(!cands.length){ $('#compare-candidates').innerHTML='<p class="muted">No other sessions match this label.</p>'; $('#compare-output').innerHTML=''; return; }
+  // auto-select up to 3 most recent
+  $('#compare-candidates').innerHTML='<b>Compare against</b> (up to 3):<div class="flagrow">'+
+    cands.map((s,i)=>`<label><input type="checkbox" class="cmp-pick" value="${s.id}" ${i<3?'checked':''}> ${s.date} — ${s.label}</label>`).join('')+'</div>';
+  $$('.cmp-pick').forEach(cb=>cb.onchange=enforceCmpLimit);
+  renderCompareCharts();
+}
+function enforceCmpLimit(){
+  const picked=$$('.cmp-pick:checked');
+  if(picked.length>3){ this.checked=false; toast('Max 3 comparison sessions'); return; }
+  renderCompareCharts();
+}
+function renderCompareCharts(){
+  const ref=SESSIONS.find(s=>s.id===$('#compare-ref').value);
+  const picks=$$('.cmp-pick:checked').map(cb=>SESSIONS.find(s=>s.id===cb.value));
+  const all=[ref,...picks];
+  const series=all.map((s,i)=>({s, color:CMP_COLORS[i%CMP_COLORS.length], reps:s.laps.filter(l=>l.type==='active')}));
+  const maxReps=Math.max(...series.map(x=>x.reps.length),0);
+  const labels=Array.from({length:maxReps},(_,i)=>'R'+(i+1));
+  const metric=(reps,fn)=>reps.map(fn);
+  const paceSec=l=>{ if(!l.pace_fmt||l.pace_fmt==='—')return null; const[m,sec]=l.pace_fmt.split(':').map(Number); return m*60+sec; };
+
+  $('#compare-output').innerHTML=`
+    <div class="row">
+      <div><h2>Pace per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-pace"></canvas></div></div></div>
+      <div><h2>HR per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-hr"></canvas></div></div></div>
+    </div>
+    <div class="row">
+      <div><h2>EA per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-ea"></canvas></div></div></div>
+      <div><h2>Lap Score per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-score"></canvas></div></div></div>
+    </div>
+    <h2>Delta table</h2>
+    <div class="card" style="overflow-x:auto">${cmpDeltaTable(all,ref)}</div>`;
+
+  const ds=(fn,fmt)=>series.map(x=>({label:x.s.date,data:metric(x.reps,fn),borderColor:x.color,backgroundColor:x.color,tension:.3,pointRadius:3,spanGaps:true}));
+  const opt=(yTitle,invertNote)=>({maintainAspectRatio:false,plugins:{legend:{display:true,position:'bottom',labels:{boxWidth:12}}},scales:{y:{title:{display:true,text:yTitle}}}});
+  cmpMakeChart('cmp-pace',labels,ds(paceSec),opt('sec/km'),true);
+  cmpMakeChart('cmp-hr',labels,ds(l=>l.hr_avg),opt('bpm'));
+  cmpMakeChart('cmp-ea',labels,ds(l=>l.ea),opt('EA (pace/HR)'));
+  cmpMakeChart('cmp-score',labels,ds(l=>l.lap_score),opt('score'));
+}
+function cmpMakeChart(id,labels,datasets,options,paceFmt){
+  destroyChart(id);
+  if(paceFmt){ options.scales.y.ticks={callback:v=>{const m=Math.floor(v/60);return m+':'+String(Math.round(v-m*60)).padStart(2,'0');}}; options.scales.y.reverse=true; }
+  charts[id]=new Chart($('#'+id),{type:'line',data:{labels,datasets},options});
+}
+function cmpDeltaTable(all,ref){
+  const arrow=(v,better)=>{ if(v==null)return ''; const cls=better==='up'?(v>0?'good':'bad'):(v<0?'good':'bad'); const sym=v>0?'▲':v<0?'▼':''; return ` <span class="${v===0?'':cls}">${sym}${num(Math.abs(v))}</span>`; };
+  const rows=all.map((s,i)=>{
+    const isRef=i===0;
+    const dEf=isRef||s.ef==null||ref.ef==null?null:+(s.ef-ref.ef).toFixed(3);
+    const dHr=isRef||s.avg_hr==null||ref.avg_hr==null?null:s.avg_hr-ref.avg_hr;
+    const sps=s.sps_t??s.sps_i, refSps=ref.sps_t??ref.sps_i;
+    const dSps=isRef||sps==null||refSps==null?null:+(sps-refSps).toFixed(1);
+    return `<tr><td>${isRef?'<b>'+s.date+' (ref)</b>':s.date}</td><td>${fmtKm(s.km)}</td><td>${num(s.avg_hr,0)}${dHr!=null?arrow(dHr,'down'):''}</td><td>${num(s.ef,3)}${dEf!=null?arrow(dEf,'up'):''}</td><td>${s.pace_fade!=null?num(s.pace_fade)+'%':'—'}</td><td>${num(sps,0)}${dSps!=null?arrow(dSps,'up'):''}</td></tr>`;
+  }).join('');
+  return `<table><thead><tr><th>Session</th><th>km</th><th>Avg HR Δ</th><th>EF Δ</th><th>Pace fade</th><th>SPS Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 
 // ── WEEKLY ──────────────────────────────────────────────────────────
 function renderWeekly(){

@@ -1274,6 +1274,99 @@ def chat():
         return jsonify({"error": f"AI request failed: {exc}"}), 502
 
 
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    """SSE streaming variant of /api/chat (Phase 2)."""
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        return jsonify({"error": "AI not configured — add ANTHROPIC_API_KEY to .env"}), 503
+    try:
+        import anthropic
+    except ImportError:
+        return jsonify({"error": "AI not configured — anthropic package not installed"}), 503
+
+    body = request.get_json(silent=True) or {}
+    store = load_store()
+    sid = body.get("session_id")
+    if not sid or sid not in store:
+        return jsonify({"error": "session not found"}), 404
+    view = build_session_view(store[sid], store)
+    system = build_context_prompt(view, store)
+    messages = body.get("history", []) + [
+        {"role": "user", "content": body.get("message", "")}]
+
+    def generate():
+        try:
+            client = anthropic.Anthropic(api_key=key)
+            with client.messages.stream(
+                model="claude-sonnet-4-20250514", max_tokens=500,
+                system=system, messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': f'AI request failed: {exc}'})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",   # disable proxy buffering
+    })
+
+
+@app.route("/api/alerts")
+def api_alerts():
+    """Complete alert suite (Phase 2) — all thresholds sourced from config."""
+    return jsonify({"alerts": compute_alerts(load_store())})
+
+
+def compute_alerts(store):
+    alerts = []
+    th = config.THRESHOLDS
+    weeks = [w for w in compute_weekly(store)["weeks"] if w["session_count"] > 0]
+    if weeks:
+        wk = weeks[-1]
+        if wk.get("wow_alert"):
+            alerts.append({"level": "alert", "kind": "volume",
+                "message": f"Weekly volume up {wk['wow_km_pct']:.1f}% vs last week "
+                           f"(> {th['weekly_increase_alert']:.0f}%)."})
+        if wk.get("acwr_status") == "alert":
+            alerts.append({"level": "alert", "kind": "acwr",
+                "message": f"ACWR {wk['acwr']:.2f} — injury-risk red zone (> {th['acwr_alert']})."})
+        elif wk.get("acwr_status") == "caution":
+            alerts.append({"level": "caution", "kind": "acwr",
+                "message": f"ACWR {wk['acwr']:.2f} — outside the "
+                           f"{th['acwr_low']}–{th['acwr_high']} sweet spot."})
+        if wk.get("easy_ratio") is not None and wk["easy_ratio"] < th["easy_ratio_target"]:
+            alerts.append({"level": "caution", "kind": "easy_ratio",
+                "message": f"Easy ratio {wk['easy_ratio']:.0f}% — below the "
+                           f"{th['easy_ratio_target']:.0f}% 80/20 target."})
+
+    views = sorted((build_session_view(r, store) for r in store.values()),
+                   key=lambda v: v["date_iso"], reverse=True)
+    recent_interval = next((v for v in views if not v["easy"]), None)
+    if recent_interval:
+        sps = recent_interval["sps_t"] if recent_interval["sps_t"] is not None else recent_interval["sps_i"]
+        if sps is not None and sps < th["sps_alert"]:
+            alerts.append({"level": "alert", "kind": "sps",
+                "message": f"Last interval SPS {sps:.0f} — below {th['sps_alert']} (poor execution)."})
+        if recent_interval["pace_fade"] is not None and recent_interval["pace_fade"] > th["pace_fade_alert"]:
+            alerts.append({"level": "caution", "kind": "fade",
+                "message": f"Last session faded {recent_interval['pace_fade']:.1f}% "
+                           f"first→last rep (> {th['pace_fade_alert']:.0f}%)."})
+        if recent_interval["hrr60_avg"] is not None and recent_interval["hrr60_avg"] < th["hrr60_alert"]:
+            alerts.append({"level": "caution", "kind": "hrr60",
+                "message": f"Last session HRR60 {recent_interval['hrr60_avg']:.0f} bpm — "
+                           f"below {th['hrr60_alert']} (slow recovery)."})
+    recent_easy = next((v for v in views if v["easy"]), None)
+    if recent_easy and recent_easy["decoupling"] is not None \
+            and recent_easy["decoupling"] > th["decoupling_alert"]:
+        alerts.append({"level": "caution", "kind": "decoupling",
+            "message": f"Last easy run decoupled {recent_easy['decoupling']:.1f}% "
+                       f"(> {th['decoupling_alert']:.0f}%) — possible fatigue or heat."})
+    return alerts
+
+
 def build_context_prompt(view, store):
     profile = config.USER_PROFILE
     # last 5 same-label sessions for comparison
