@@ -1,0 +1,14 @@
+# Secrets & local data
+.env
+.garmin_session/
+sessions.json
+fit_files/*.fit
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

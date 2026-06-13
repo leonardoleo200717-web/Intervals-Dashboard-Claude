@@ -1,0 +1,5 @@
+Flask==3.0.3
+fit-tool==0.9.13
+garminconnect==0.2.25
+python-dotenv==1.0.1
+anthropic==0.39.0
