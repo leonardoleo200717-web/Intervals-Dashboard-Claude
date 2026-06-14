@@ -36,6 +36,22 @@ try:
     from fit_tool.profile.messages.lap_message import LapMessage
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.profile_type import Sport, SubSport, LapTrigger
+
+    # fit-tool decodes FIT string fields with a strict bytes.decode('utf-8').
+    # Real Garmin files routinely pad string fields with 0xff or carry
+    # non-UTF-8 bytes (device/product names, developer field names), which
+    # makes the strict decode raise UnicodeDecodeError and abort the whole
+    # file. Patch the string reader to decode leniently (bad bytes → U+FFFD)
+    # so the numeric data we actually use still parses.
+    from fit_tool.field import Field as _FitField
+
+    def _lenient_read_strings_from_bytes(self, bytes_buffer):
+        string_container = bytes_buffer.decode("utf-8", errors="replace")
+        strings = string_container.split("\x00")[:-1]
+        self.encoded_values = [s for s in strings if s]
+
+    _FitField.read_strings_from_bytes = _lenient_read_strings_from_bytes
+
     FIT_TOOL_AVAILABLE = True
 except Exception:  # pragma: no cover - only when dependency missing
     FIT_TOOL_AVAILABLE = False
@@ -183,7 +199,12 @@ def parse_fit(path):
     if not FIT_TOOL_AVAILABLE:
         raise RuntimeError("fit-tool is not installed — run: pip install fit-tool")
 
-    fit = FitFile.from_file(path)
+    # FitFile.from_file() validates the CRC with check_crc=True hardcoded and
+    # raises on a mismatch. Real Garmin files (re-exports, multi-session, etc.)
+    # often trip this even though the data is intact, so read the bytes and
+    # parse with check_crc=False — fit-tool then warns instead of aborting.
+    with open(path, "rb") as fh:
+        fit = FitFile.from_bytes(fh.read(), check_crc=False)
 
     sport = sub_sport = None
     sess_start = sess_dist = sess_elapsed = sess_avg_hr = None
