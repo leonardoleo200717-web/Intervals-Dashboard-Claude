@@ -46,35 +46,38 @@ def get_client():
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASSWORD")
 
-    # Try restoring a cached tokenstore first (no credentials needed).
+    # Try restoring a cached token session first (no credentials needed).
+    # In garminconnect 0.3.x, login(tokenstore) loads saved tokens from that path.
     if os.path.isdir(SESSION_DIR):
         try:
             client = Garmin()
             client.login(SESSION_DIR)
             return client
         except Exception:
-            pass  # fall through to fresh login
+            pass  # tokens missing/expired — fall through to a fresh login
 
     if not email or not password:
         sys.exit("Set GARMIN_EMAIL and GARMIN_PASSWORD in .env (see .env.example).")
 
-    client = Garmin(email, password)
+    # Fresh credential login. prompt_mfa is called automatically if the account
+    # has 2FA enabled. Passing the tokenstore path to login() makes the library
+    # persist the session there itself (there is no client.garth.dump in 0.3.x).
+    client = Garmin(email, password, prompt_mfa=lambda: input("Garmin 2FA code: ").strip())
     try:
-        client.login()
+        client.login(SESSION_DIR)
     except Exception as exc:
         sys.exit(f"Garmin login failed: {exc}\n"
                  "If this persists, use manual export (README §Manual export).")
 
-    # Persist the session for next time (chmod 600 on the tokenstore).
+    # Tighten permissions on the saved token files.
     try:
-        client.garth.dump(SESSION_DIR)
         os.chmod(SESSION_DIR, 0o700)
         for f in os.listdir(SESSION_DIR):
             try:
                 os.chmod(os.path.join(SESSION_DIR, f), 0o600)
             except OSError:
                 pass
-    except Exception:
+    except OSError:
         pass
     return client
 

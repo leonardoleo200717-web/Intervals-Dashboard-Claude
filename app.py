@@ -36,6 +36,22 @@ try:
     from fit_tool.profile.messages.lap_message import LapMessage
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.profile_type import Sport, SubSport, LapTrigger
+
+    # fit-tool decodes FIT string fields with a strict bytes.decode('utf-8').
+    # Real Garmin files routinely pad string fields with 0xff or carry
+    # non-UTF-8 bytes (device/product names, developer field names), which
+    # makes the strict decode raise UnicodeDecodeError and abort the whole
+    # file. Patch the string reader to decode leniently (bad bytes → U+FFFD)
+    # so the numeric data we actually use still parses.
+    from fit_tool.field import Field as _FitField
+
+    def _lenient_read_strings_from_bytes(self, bytes_buffer):
+        string_container = bytes_buffer.decode("utf-8", errors="replace")
+        strings = string_container.split("\x00")[:-1]
+        self.encoded_values = [s for s in strings if s]
+
+    _FitField.read_strings_from_bytes = _lenient_read_strings_from_bytes
+
     FIT_TOOL_AVAILABLE = True
 except Exception:  # pragma: no cover - only when dependency missing
     FIT_TOOL_AVAILABLE = False
@@ -50,6 +66,10 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB — allow batch uploads
+
+# Anthropic model for the AI chat. The spec's claude-sonnet-4-20250514 (Sonnet 4.0)
+# retires 2026-06-15; this is the current Sonnet ("or newer" per CLAUDE.md §13).
+CHAT_MODEL = "claude-sonnet-4-6"
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -183,7 +203,12 @@ def parse_fit(path):
     if not FIT_TOOL_AVAILABLE:
         raise RuntimeError("fit-tool is not installed — run: pip install fit-tool")
 
-    fit = FitFile.from_file(path)
+    # FitFile.from_file() validates the CRC with check_crc=True hardcoded and
+    # raises on a mismatch. Real Garmin files (re-exports, multi-session, etc.)
+    # often trip this even though the data is intact, so read the bytes and
+    # parse with check_crc=False — fit-tool then warns instead of aborting.
+    with open(path, "rb") as fh:
+        fit = FitFile.from_bytes(fh.read(), check_crc=False)
 
     sport = sub_sport = None
     sess_start = sess_dist = sess_elapsed = sess_avg_hr = None
@@ -1263,13 +1288,14 @@ def chat():
     try:
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CHAT_MODEL,
             max_tokens=500,
             system=system,
             messages=body.get("history", []) + [
                 {"role": "user", "content": body.get("message", "")}],
         )
-        return jsonify({"reply": msg.content[0].text})
+        reply = next((b.text for b in msg.content if b.type == "text"), "")
+        return jsonify({"reply": reply})
     except Exception as exc:
         return jsonify({"error": f"AI request failed: {exc}"}), 502
 
@@ -1299,7 +1325,7 @@ def chat_stream():
         try:
             client = anthropic.Anthropic(api_key=key)
             with client.messages.stream(
-                model="claude-sonnet-4-20250514", max_tokens=500,
+                model=CHAT_MODEL, max_tokens=500,
                 system=system, messages=messages,
             ) as stream:
                 for text in stream.text_stream:
