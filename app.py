@@ -67,6 +67,10 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB — allow batch uploads
 
+# Anthropic model for the AI chat. The spec's claude-sonnet-4-20250514 (Sonnet 4.0)
+# retires 2026-06-15; this is the current Sonnet ("or newer" per CLAUDE.md §13).
+CHAT_MODEL = "claude-sonnet-4-6"
+
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -1284,13 +1288,14 @@ def chat():
     try:
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CHAT_MODEL,
             max_tokens=500,
             system=system,
             messages=body.get("history", []) + [
                 {"role": "user", "content": body.get("message", "")}],
         )
-        return jsonify({"reply": msg.content[0].text})
+        reply = next((b.text for b in msg.content if b.type == "text"), "")
+        return jsonify({"reply": reply})
     except Exception as exc:
         return jsonify({"error": f"AI request failed: {exc}"}), 502
 
@@ -1320,7 +1325,7 @@ def chat_stream():
         try:
             client = anthropic.Anthropic(api_key=key)
             with client.messages.stream(
-                model="claude-sonnet-4-20250514", max_tokens=500,
+                model=CHAT_MODEL, max_tokens=500,
                 system=system, messages=messages,
             ) as stream:
                 for text in stream.text_stream:
