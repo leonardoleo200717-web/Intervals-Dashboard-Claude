@@ -88,7 +88,9 @@ L'architettura non lo preclude (container cron che esegue `garmin_sync.py` ogni 
 ## Uso
 
 - **Tag sessione:** in dettaglio sessione puoi marcare **Easy run** (disattiva i KPI per-lap, esclude dalle viste ripetute) e **Track session** (arrotondamento distanze stretto). Puoi inserire un **target teorico** per popolare SPS-T e i delta per-lap. Ogni modifica ricalcola subito i KPI.
-- **Home:** carico della settimana, trend HR @ ritmo di riferimento (il tracker del progresso aerobico), trend EF per tipo di sessione, trend SPS, indicatore ACWR e la suite completa di alert (volume, ACWR, easy ratio, SPS, pace fade, HRR60, decoupling).
+- **Home:** carico della settimana, trend HR @ ritmo di riferimento (il tracker del progresso aerobico), trend EF per tipo di sessione, trend SPS, indicatore ACWR con banda sweet-spot 0.8–1.3 ombreggiata, **previsione tempi di gara** (modello di Riegel: proietta 5K/10K/mezza/maratona dal tuo miglior sforzo lungo ≥ 1 km e lo confronta con l'obiettivo maratona) e la suite completa di alert (volume, ACWR, easy ratio, SPS, pace fade, HRR60, decoupling).
+- **Rilevamento ripetute:** la struttura viene riconosciuta, in ordine di affidabilità, da: (1) correzione manuale per-lap (menu Type nella tabella), (2) allenamento strutturato Garmin incorporato nel FIT, (3) convenzione di denominazione nel titolo dell'attività (es. `5x5'`, `10x90"`, `5x4km p1'`), (4) euristica sul ritmo. Il riquadro "Detected set" mostra la fonte usata; puoi sempre forzare la struttura digitandola o correggere singoli lap. Warm-up e cool-down sono sempre esclusi.
+- **Recovery adherence:** se indichi il recupero pianificato nel titolo (es. `p1'` o `r400m`), la dashboard confronta i recuperi reali con quelli previsti.
 - **Compare:** scegli una sessione di riferimento; le sessioni con la stessa etichetta (o time-based entro ±1 min) vengono auto-selezionate. Grafici sovrapposti per ripetuta (ritmo, HR, EA, Lap Score) e tabella delta con frecce.
 - **Weekly:** totali Lun–Dom, volume giornaliero, TRIMP, ACWR, alert se l'aumento settimanale supera il +10%.
 

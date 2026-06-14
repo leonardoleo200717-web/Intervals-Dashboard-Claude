@@ -102,6 +102,9 @@ input[type=text],input[type=number]{font-family:inherit;font-size:13px}
 .src-badge.src-heuristic{background:#fdf0dc;color:#a9711a}
 .small{font-size:12px}
 .lap-type{padding:3px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px}
+.predict-table{width:100%;border-collapse:collapse}
+.predict-table th,.predict-table td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
+.predict-table th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .btn{padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--panel);font-weight:500}
 .btn.primary{background:var(--teal);color:#fff;border-color:var(--teal)}
 
@@ -169,6 +172,9 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
         <p class="muted" style="margin:10px 0 0">Sweet spot 0.8–1.3 (shaded). Above 1.5 = injury-risk red zone.</p>
       </div>
 
+      <h2>Race predictor</h2>
+      <div id="home-predict"></div>
+
       <h2>Recent interval sessions</h2>
       <div id="home-recent"></div>
     </section>
@@ -234,7 +240,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const charts={};
-let SESSIONS=[], WEEKLY=null, ALERTS=[];
+let SESSIONS=[], WEEKLY=null, ALERTS=[], CONFIG={}, PREDICTIONS=null;
 
 function destroyChart(k){ if(charts[k]){charts[k].destroy(); delete charts[k];} }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
@@ -250,11 +256,33 @@ function show(view){
 $$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); });
 
 // ── data load ───────────────────────────────────────────────────────
-async function loadSessions(){ SESSIONS=await (await fetch('/api/sessions')).json(); }
-async function loadWeekly(){ WEEKLY=await (await fetch('/api/weekly')).json(); }
-async function loadAlerts(){ try{ ALERTS=(await (await fetch('/api/alerts')).json()).alerts||[]; }catch(e){ ALERTS=[]; } }
+// Single fetch helper: throws (and toasts) on any non-OK / non-JSON response
+// so failures surface honestly instead of leaving the UI blank.
+async function fetchJSON(url, opts){
+  let res;
+  try{ res=await fetch(url, opts); }
+  catch(e){ toast('Network error — is the server running?'); throw e; }
+  if(!res.ok){
+    let msg='Request failed ('+res.status+')';
+    try{ const j=await res.json(); if(j&&j.error) msg=j.error; }catch(e){}
+    toast(msg); throw new Error(msg);
+  }
+  try{ return await res.json(); }
+  catch(e){ toast('Server returned invalid data.'); throw e; }
+}
 
-async function refreshAll(){ await Promise.all([loadSessions(), loadWeekly(), loadAlerts()]); renderHome(); }
+async function loadSessions(){ SESSIONS=await fetchJSON('/api/sessions'); }
+async function loadWeekly(){ WEEKLY=await fetchJSON('/api/weekly'); }
+async function loadAlerts(){ try{ ALERTS=(await fetchJSON('/api/alerts')).alerts||[]; }catch(e){ ALERTS=[]; } }
+async function loadConfig(){ try{ CONFIG=await fetchJSON('/api/config'); }catch(e){ CONFIG={}; } }
+async function loadPredictions(){ try{ PREDICTIONS=await fetchJSON('/api/predictions'); }catch(e){ PREDICTIONS=null; } }
+
+async function refreshAll(){
+  try{
+    await Promise.all([loadSessions(), loadWeekly(), loadAlerts(), loadConfig(), loadPredictions()]);
+  }catch(e){ /* individual loaders already toasted */ }
+  renderHome();
+}
 
 // ── badges ──────────────────────────────────────────────────────────
 function badges(s){
@@ -273,12 +301,13 @@ function renderHome(){
     $('#home-banners').innerHTML='';
     main.innerHTML='<div class="empty card" style="grid-column:1/-1">No sessions yet. Click <b>Import FIT</b> or drop files in <code>fit_files/</code> and <b>Scan</b>.</div>';
     $('#home-recent').innerHTML='';
+    $('#home-predict').innerHTML='';
     ['refpace','ef','sps','acwr'].forEach(destroyChart);
     return;
   }
   const weeks=(WEEKLY&&WEEKLY.weeks)||[];
   const wk=weeks.length?weeks[weeks.length-1]:null;
-  const target=70;
+  const target=CONFIG.weekly_km_target||70;
   // alert banner suite (computed server-side from config thresholds)
   $('#home-banners').innerHTML = ALERTS.length
     ? ALERTS.map(a=>`<div class="banner ${a.level}">${a.level==='alert'?'⚠':'⚑'} ${a.message}</div>`).join('')
@@ -298,10 +327,33 @@ function renderHome(){
   setupEfSelector();
   renderSpsChart();
   renderAcwrChart();
+  renderPredictions();
 
   const recent=SESSIONS.filter(s=>!s.easy).slice(0,3);
   $('#home-recent').innerHTML = recent.length? tableSessions(recent) : '<div class="card muted">No interval sessions yet.</div>';
 }
+
+function renderPredictions(){
+  const box=$('#home-predict');
+  const p=PREDICTIONS;
+  if(!p||!p.predictions||!p.predictions.length){
+    box.innerHTML='<div class="card muted">No race prediction yet — needs at least one hard rep of ≥ 1 km.</div>';
+    return;
+  }
+  const confLabel={high:'high confidence',medium:'medium confidence',low:'low confidence — short anchor'}[p.confidence]||p.confidence;
+  const dm=p.marathon_delta_s;
+  const deltaTxt = dm===0?'on goal'
+    : (dm>0?`${fmtClock(dm)} slower than goal`:`${fmtClock(-dm)} faster than goal`);
+  const deltaCls = dm>0?'bad':'good';
+  const rows=p.predictions.map(r=>`<tr><td>${r.name}</td><td class="mono">${r.time_fmt}</td><td class="mono">${r.pace_fmt}/km</td></tr>`).join('');
+  box.innerHTML=`<div class="card">
+    <p class="muted small" style="margin:0 0 8px">Riegel projection from your best long effort:
+      <b>${p.anchor.label}</b> — ${Math.round(p.anchor.distance_m)} m @ ${p.anchor.pace_fmt}/km (${p.anchor.date}). <i>${confLabel}.</i></p>
+    <table class="predict-table"><thead><tr><th>Distance</th><th>Predicted</th><th>Pace</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small" style="margin:10px 0 0">Marathon goal ${p.marathon_goal_fmt} (${p.marathon_goal_pace_fmt}/km) — predicted <b class="${deltaCls}">${deltaTxt}</b>.</p>
+  </div>`;
+}
+function fmtClock(sec){ sec=Math.abs(Math.round(sec)); const m=Math.floor(sec/60),s=sec%60; return m+':'+String(s).padStart(2,'0'); }
 
 function renderRefPaceChart(){
   destroyChart('refpace');
@@ -338,13 +390,19 @@ function renderSpsChart(){
 function renderAcwrChart(){
   destroyChart('acwr');
   const weeks=(WEEKLY&&WEEKLY.weeks)||[];
+  const lo=CONFIG.acwr_low??0.8, hi=CONFIG.acwr_high??1.3;
+  const band=v=>weeks.map(()=>v);
+  // Two borderless datasets shade the [lo, hi] sweet spot: the upper line
+  // fills down to the lower line. The ACWR line is drawn on top (order 0).
   charts.acwr=new Chart($('#chart-acwr'),{type:'line',data:{labels:weeks.map(w=>w.label),
-    datasets:[{label:'ACWR',data:weeks.map(w=>w.acwr),borderColor:'#e0972a',tension:.3,pointRadius:4,
-      segment:{}, spanGaps:true}]},
+    datasets:[
+      {label:'ACWR',data:weeks.map(w=>w.acwr),borderColor:'#e0972a',tension:.3,pointRadius:4,spanGaps:true,order:0},
+      {label:'sweet-spot top',data:band(hi),borderColor:'transparent',pointRadius:0,fill:'+1',backgroundColor:'rgba(29,158,117,0.12)',order:1},
+      {label:'sweet-spot bottom',data:band(lo),borderColor:'transparent',pointRadius:0,fill:false,order:2},
+    ]},
     options:{maintainAspectRatio:false,plugins:{legend:{display:false},
-      annotation:false},
-      scales:{y:{min:0,suggestedMax:2,title:{display:true,text:'ratio'}}}}});
-  // draw sweet-spot band manually via a plugin-free overlay dataset
+      tooltip:{filter:item=>item.datasetIndex===0}},
+      scales:{y:{min:0,suggestedMax:2,title:{display:true,text:`ratio · sweet spot ${lo}–${hi}`}}}}});
 }
 
 // ── HISTORY ─────────────────────────────────────────────────────────
@@ -373,7 +431,9 @@ document.addEventListener('click',e=>{
 // ── SESSION DETAIL ──────────────────────────────────────────────────
 let CURRENT=null, CHAT_HISTORY=[];
 async function openSession(id){
-  const s=await (await fetch('/api/sessions/'+id)).json();
+  let s;
+  try{ s=await fetchJSON('/api/sessions/'+id); }
+  catch(e){ return; }
   CURRENT=s; CHAT_HISTORY=[];
   show('session');
   renderSession(s);
@@ -395,6 +455,11 @@ function renderSession(s){
     kpis+=kpiCard('HRR60 avg', s.hrr60_avg!=null?num(s.hrr60_avg)+' bpm':(s.rqs_avg!=null?'RQS '+num(s.rqs_avg)+'%':'—'),'recovery', s.hrr60_avg!=null?(s.hrr60_avg>=25?'good':s.hrr60_avg>=15?'warn':'bad'):'');
     kpis+=kpiCard('SPS-I', num(s.sps_i,0),'inferred target');
     kpis+=kpiCard('SPS-T', s.sps_t!=null?num(s.sps_t,0):'—','set a target →');
+    if(s.recovery_adherence!=null){
+      const a=s.recovery_adherence;
+      const cls=a<=110?'good':a<=140?'warn':'bad';
+      kpis+=kpiCard('Recovery adherence', a+'%', `${s.recovery_actual_fmt} vs ${s.recovery_target_fmt} plan`, cls);
+    }
   }
   kpis+=kpiCard('HR @ ref pace', s.hr_at_ref_pace!=null?num(s.hr_at_ref_pace,0)+' bpm':'—','3:55–4:05/km');
 
@@ -479,9 +544,11 @@ async function patchLapTypes(){
 }
 
 async function patchAndRefresh(body){
-  const s=await (await fetch('/api/sessions/'+CURRENT.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  let s;
+  try{ s=await fetchJSON('/api/sessions/'+CURRENT.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
+  catch(e){ return; }
   CURRENT=s; renderSession(s);
-  await Promise.all([loadSessions(), loadWeekly(), loadAlerts()]);
+  await Promise.all([loadSessions(), loadWeekly(), loadAlerts(), loadPredictions()]);
 }
 
 const LAP_TYPE_OPTS=[['active','Active'],['recovery','Recovery'],['wu','Warm-up'],['cd','Cool-down'],['drill','Drill']];
@@ -688,7 +755,10 @@ async function uploadFiles(files){
   const fd=new FormData();
   [...files].forEach(f=>fd.append('files[]',f));
   $('#import-results').innerHTML='<p class="muted">Uploading…</p>';
-  const data=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
+  let data;
+  try{ data=await fetchJSON('/api/upload',{method:'POST',body:fd}); }
+  catch(e){ $('#import-results').innerHTML=`<p class="bad">${e.message||'Upload failed'}</p>`; return; }
+  finally{ $('#file-input').value=''; }  // allow re-selecting the same file
   $('#import-results').innerHTML=(data.results||[]).map(r=>{
     const ok=r.status==='ok'; const dup=r.status==='duplicate';
     const cls=ok?'good':dup?'warn':'bad';
@@ -698,7 +768,9 @@ async function uploadFiles(files){
 }
 
 $('#btn-scan').onclick=async()=>{
-  const data=await (await fetch('/api/scan',{method:'POST'})).json();
+  let data;
+  try{ data=await fetchJSON('/api/scan',{method:'POST'}); }
+  catch(e){ return; }
   toast(`Scan: ${data.added.length} added, ${data.skipped.length} skipped, ${data.errors.length} errors`);
   await refreshAll();
 };
