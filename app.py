@@ -438,13 +438,18 @@ def _extract_planned_from_steps(steps):
     if not measures:
         return None
     rest = [s for s in flat if s["intensity"] in ("rest", "recovery")]
-    rec_vals = [(r["seconds"] if itype == "time" else r["meters"]) for r in rest]
+    # Rest steps carry their own duration type (e.g. 90 s rest between 400 m reps).
+    rec_itype = None
+    if rest:
+        rec_itype = "time" if rest[0]["dtype"] == "time" else "distance"
+    rec_vals = [(r["seconds"] if rec_itype == "time" else r["meters"]) for r in rest]
     rec_vals = [v for v in rec_vals if v]
     return {
         "itype": itype,
         "rep_count": len(actives),
         "rep_target": statistics.median(measures),
         "recovery_target": statistics.median(rec_vals) if rec_vals else None,
+        "recovery_itype": rec_itype,
         "source": "workout",
     }
 
@@ -562,6 +567,7 @@ def parse_structure_string(text):
         "rep_count": int(m.group("n")),
         "rep_target": amount,
         "recovery_target": None,
+        "recovery_itype": None,
         "source": "name",
     }
     rm = _REC_RE.search(text[m.end():])
@@ -569,6 +575,7 @@ def parse_structure_string(text):
         rkind, ramount = _value_to_seconds_or_meters(rm.group("val"), rm.group("unit"))
         if rkind is not None:
             spec["recovery_target"] = ramount
+            spec["recovery_itype"] = rkind
     return spec
 
 
@@ -916,6 +923,8 @@ def build_session_view(record, store):
         "pace_fade": None, "pace_cv": None,
         "rqs_avg": None, "hrr60_avg": None,
         "sps_t": None, "sps_i": None,
+        "recovery_target_fmt": None, "recovery_actual_fmt": None,
+        "recovery_adherence": None,
         "inferred_target": None,
         "itype": None, "label": None,
         "structure": record.get("structure"),
@@ -1068,6 +1077,9 @@ def build_session_view(record, store):
     elif inferred_dur and itype == "time":
         view["inferred_target"] = fmt_duration(inferred_dur)
 
+    # recovery adherence — did the actual recoveries match the planned rest?
+    _attach_recovery_adherence(view, classified, spec)
+
     # SPS-I (inferred) and SPS-T (theoretical, null until target set)
     view["sps_i"] = _compute_sps(view, rep_paces, rep_durations, hrr_values,
                                  rqs_values, ea_median, itype,
@@ -1175,6 +1187,28 @@ def _compute_sps(view, rep_paces, rep_durations, hrr_values, rqs_values,
         "recovery": (w["recovery"], rec_comp),
     })
     return score
+
+
+def _attach_recovery_adherence(view, classified, spec):
+    """Compare the actual recovery laps to the planned rest from the structure.
+
+    Adherence = actual / planned × 100 (100 = on plan, > 100 = over-resting).
+    Only computed when a recovery target is known and recovery laps exist.
+    """
+    if not spec or not spec.get("recovery_target"):
+        return
+    rtype = spec.get("recovery_itype") or "time"
+    target = spec["recovery_target"]
+    recs = [lp for lp in classified if lp["type"] == "recovery"]
+    actuals = [(lp["duration_s"] if rtype == "time" else lp["distance_m"]) for lp in recs]
+    actuals = [a for a in actuals if a]
+    if not actuals:
+        return
+    actual = statistics.mean(actuals)
+    fmt = fmt_duration if rtype == "time" else (lambda m: f"{round(m)} m")
+    view["recovery_target_fmt"] = fmt(target)
+    view["recovery_actual_fmt"] = fmt(actual)
+    view["recovery_adherence"] = round(actual / target * 100.0, 0) if target else None
 
 
 def _build_label(actives, itype, track, spec=None):
@@ -1552,6 +1586,16 @@ def api_weekly():
     return jsonify(compute_weekly(store))
 
 
+@app.route("/api/config")
+def api_config():
+    return jsonify(public_config())
+
+
+@app.route("/api/predictions")
+def api_predictions():
+    return jsonify(compute_race_predictions(load_store()) or {})
+
+
 @app.route("/api/sessions/<sid>/export.csv")
 def api_export_csv(sid):
     store = load_store()
@@ -1700,6 +1744,95 @@ def compute_alerts(store):
             "message": f"Last easy run decoupled {recent_easy['decoupling']:.1f}% "
                        f"(> {th['decoupling_alert']:.0f}%) — possible fatigue or heat."})
     return alerts
+
+
+# ════════════════════════════════════════════════════════════════════
+# Race-time prediction (Riegel)
+# ════════════════════════════════════════════════════════════════════
+RIEGEL_EXPONENT = 1.06
+RACE_DISTANCES = [("5K", 5000.0), ("10K", 10000.0),
+                  ("Half", 21097.5), ("Marathon", 42195.0)]
+
+
+def _riegel(t1, d1, d2):
+    """Predict time over d2 from a (t1, d1) effort. Riegel's endurance model."""
+    return t1 * (d2 / d1) ** RIEGEL_EXPONENT
+
+
+def compute_race_predictions(store):
+    """Project race times from the best long hard effort in the data.
+
+    Anchors on the longest active rep (≥ 1000 m) across non-easy sessions —
+    longer efforts extrapolate to the marathon far more reliably than 400s.
+    Returns None when there is no usable anchor.
+    """
+    candidates = []  # (distance_m, duration_s, date_iso, date, label)
+    for r in store.values():
+        if r.get("easy"):
+            continue
+        view = build_session_view(r, store)
+        for lp in view["laps"]:
+            if lp["type"] != "active":
+                continue
+            d, t = lp.get("distance_m"), lp.get("duration_s")
+            if d and t and d >= 1000 and t > 0:
+                candidates.append((d, t, view["date_iso"], view["date"], view["label"]))
+    if not candidates:
+        return None
+
+    # Anchor = longest effort, tie-broken by faster pace.
+    anchor = max(candidates, key=lambda c: (c[0], -c[1] / c[0]))
+    a_dist, a_time, _iso, a_date, a_label = anchor
+    confidence = ("high" if a_dist >= 5000 else
+                  "medium" if a_dist >= 3000 else "low")
+
+    predictions = []
+    for name, dist in RACE_DISTANCES:
+        t = _riegel(a_time, a_dist, dist)
+        predictions.append({
+            "name": name,
+            "distance_m": dist,
+            "time_fmt": fmt_duration(t),
+            "pace_fmt": fmt_pace(t / (dist / 1000.0)),
+            "pace_sec_km": round(t / (dist / 1000.0), 1),
+        })
+
+    goal_pace = config.USER_PROFILE["marathon_target_pace"]
+    goal_time = goal_pace * 42.195
+    pred_marathon = _riegel(a_time, a_dist, 42195.0)
+    return {
+        "anchor": {
+            "distance_m": round(a_dist),
+            "duration_s": round(a_time),
+            "pace_fmt": fmt_pace(a_time / (a_dist / 1000.0)),
+            "date": a_date,
+            "label": a_label,
+        },
+        "confidence": confidence,
+        "predictions": predictions,
+        "marathon_goal_fmt": fmt_duration(goal_time),
+        "marathon_goal_pace_fmt": fmt_pace(goal_pace),
+        "marathon_delta_s": round(pred_marathon - goal_time),
+    }
+
+
+def public_config():
+    """Curated config exposed to the frontend so nothing is hard-coded there."""
+    p = config.USER_PROFILE
+    th = config.THRESHOLDS
+    return {
+        "weekly_km_target": p["weekly_km_target"],
+        "hr_max": p["hr_max"],
+        "zone2_ceiling": p["zone2_hr"][1],
+        "marathon_target_pace_fmt": fmt_pace(p["marathon_target_pace"]),
+        "reference_pace_band": [fmt_pace(config.REFERENCE_PACE_BAND[0]),
+                                fmt_pace(config.REFERENCE_PACE_BAND[1])],
+        "acwr_low": th["acwr_low"],
+        "acwr_high": th["acwr_high"],
+        "acwr_alert": th["acwr_alert"],
+        "easy_ratio_target": th["easy_ratio_target"],
+        "weekly_increase_alert": th["weekly_increase_alert"],
+    }
 
 
 def build_context_prompt(view, store):
