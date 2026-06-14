@@ -37,6 +37,17 @@ try:
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.profile_type import Sport, SubSport, LapTrigger
 
+    # Structured-workout messages are optional: only present when the run was
+    # done following a planned Garmin workout. Import defensively so a fit-tool
+    # build without these classes still parses ordinary activities.
+    try:
+        from fit_tool.profile.messages.workout_message import WorkoutMessage
+        from fit_tool.profile.messages.workout_step_message import WorkoutStepMessage
+        from fit_tool.profile.profile_type import Intensity, WorkoutStepDuration
+    except Exception:  # pragma: no cover
+        WorkoutMessage = WorkoutStepMessage = None
+        Intensity = WorkoutStepDuration = None
+
     # fit-tool decodes FIT string fields with a strict bytes.decode('utf-8').
     # Real Garmin files routinely pad string fields with 0xff or carry
     # non-UTF-8 bytes (device/product names, developer field names), which
@@ -214,6 +225,8 @@ def parse_fit(path):
     sess_start = sess_dist = sess_elapsed = sess_avg_hr = None
     laps = []
     records = []  # (t_epoch, hr, speed_m_s)
+    workout_name = None
+    workout_steps = []
 
     for rec in fit.records:
         msg = rec.message
@@ -224,6 +237,10 @@ def parse_fit(path):
             sess_dist = _get(msg, "total_distance")
             sess_elapsed = _get(msg, "total_elapsed_time")
             sess_avg_hr = _get(msg, "avg_heart_rate")
+        elif WorkoutMessage is not None and isinstance(msg, WorkoutMessage):
+            workout_name = _get(msg, "wkt_name", "workout_name")
+        elif WorkoutStepMessage is not None and isinstance(msg, WorkoutStepMessage):
+            workout_steps.append(_read_workout_step(msg))
         elif isinstance(msg, LapMessage):
             laps.append({
                 "distance_m": _get(msg, "total_distance") or 0.0,
@@ -313,6 +330,15 @@ def parse_fit(path):
     date_iso = start_dt.strftime("%Y-%m-%d")
     date_fmt = f"{start_dt.day} {MONTHS[start_dt.month - 1]} {start_dt.year}"
 
+    # The Garmin activity title is not stored inside an exported FIT; garmin_sync
+    # writes it to a "<stem>.meta.json" sidecar so a naming convention in the
+    # title can drive interval detection on synced files too.
+    activity_name = _read_activity_name_sidecar(path)
+
+    # Best-effort structure planned in a Garmin structured workout (intensity
+    # markers tell us warmup/cooldown/recovery/active without pace guessing).
+    planned = _extract_planned_from_steps(workout_steps)
+
     record = {
         "id": stem,
         "date_iso": date_iso,
@@ -328,12 +354,99 @@ def parse_fit(path):
         "zone_seconds": zone_seconds,
         "seconds_below_zone2": below_z2,
         "trace_seconds": trace_secs,
-        # user-editable flags (defaults)
+        # detection inputs (read-only signals from the file/garmin)
+        "workout_name": workout_name or None,
+        "activity_name": activity_name,
+        "planned": planned,
+        # user-editable flags / overrides (defaults)
         "easy": False,
         "track": ("track" in (sub_sport or "")) or (sub_sport == "track_running"),
         "theoretical_target": None,
+        "structure": None,     # user-typed "5x5'" / "5x4km p1'" override
+        "lap_types": {},        # {lap_index: "wu"|"cd"|"active"|"recovery"|"drill"}
     }
     return record, None
+
+
+def _read_workout_step(msg):
+    """Normalise one WorkoutStepMessage into a plain dict (defensive)."""
+    dtype = normalize_enum(_get(msg, "duration_type"), WorkoutStepDuration)
+    intensity = normalize_enum(_get(msg, "intensity"), Intensity)
+    return {
+        "index": _get(msg, "message_index"),
+        "name": _get(msg, "wkt_step_name"),
+        "dtype": dtype,
+        "intensity": intensity,
+        # fit-tool exposes scaled accessors when available: seconds / metres.
+        "seconds": _get(msg, "duration_time"),
+        "meters": _get(msg, "duration_distance"),
+        # repeat steps point back to an earlier step index and carry a count.
+        "repeat_from": _get(msg, "duration_step", "duration_value"),
+        "repeat_count": _get(msg, "repeat_steps", "target_value"),
+    }
+
+
+def _read_activity_name_sidecar(fit_path):
+    """Return the activity title from a "<stem>.meta.json" sidecar, if present."""
+    side = os.path.splitext(fit_path)[0] + ".meta.json"
+    if not os.path.exists(side):
+        return None
+    try:
+        with open(side, "r", encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("activity_name") or None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _extract_planned_from_steps(steps):
+    """Derive an interval spec from structured-workout steps.
+
+    Returns {"itype","rep_count","rep_target","recovery_target","source"} or
+    None. Repeats are expanded; intensity markers split active from rest. This
+    is best-effort: any uncertainty returns None so name/heuristic take over.
+    """
+    if not steps:
+        return None
+    ordered = sorted(steps, key=lambda s: (s["index"] if s["index"] is not None else 0))
+    flat = []
+    guard = 0
+    for s in ordered:
+        guard += 1
+        if guard > 5000:
+            break
+        if s["dtype"] == "repeat_until_steps_cmplt":
+            frm = s["repeat_from"]
+            cnt = int(s["repeat_count"]) if s["repeat_count"] else 1
+            if frm is None or cnt <= 1:
+                continue
+            block = [b for b in ordered if b["index"] is not None
+                     and frm <= b["index"] < (s["index"] or 0)
+                     and b["dtype"] != "repeat_until_steps_cmplt"]
+            for _ in range(cnt - 1):  # block already appears once inline
+                flat.extend(block)
+        else:
+            flat.append(s)
+
+    def is_active(st):
+        return st["intensity"] in ("active", "interval", "")
+    actives = [s for s in flat if is_active(s) and s["dtype"] in ("time", "distance")]
+    if not actives:
+        return None
+    itype = "time" if actives[0]["dtype"] == "time" else "distance"
+    measures = [(a["seconds"] if itype == "time" else a["meters"]) for a in actives]
+    measures = [m for m in measures if m]
+    if not measures:
+        return None
+    rest = [s for s in flat if s["intensity"] in ("rest", "recovery")]
+    rec_vals = [(r["seconds"] if itype == "time" else r["meters"]) for r in rest]
+    rec_vals = [v for v in rec_vals if v]
+    return {
+        "itype": itype,
+        "rep_count": len(actives),
+        "rep_target": statistics.median(measures),
+        "recovery_target": statistics.median(rec_vals) if rec_vals else None,
+        "source": "workout",
+    }
 
 
 def _merge_stub_laps(laps):
@@ -392,10 +505,108 @@ def _zone_breakdown(trace):
 
 
 # ════════════════════════════════════════════════════════════════════
+# Structure resolution (what was the planned set?)
+# ════════════════════════════════════════════════════════════════════
+import re
+
+_DUR_RE = re.compile(
+    r"(?P<n>\d+)\s*[x×]\s*"                       # rep count, e.g. 5x
+    r"(?P<val>\d+(?:[.:]\d+)?)\s*"                # value, e.g. 5 / 1.5 / 1:30
+    r"(?P<unit>'|\"|min(?:ute)?s?|sec(?:ond)?s?|s|m\b|km|k|metri|metres?|meters?)?",
+    re.IGNORECASE)
+_REC_RE = re.compile(
+    r"(?:p|r|rec(?:upero|overy)?|rest)\s*"        # recovery marker p / r / rec
+    r"(?P<val>\d+(?:[.:]\d+)?)\s*"
+    r"(?P<unit>'|\"|min(?:ute)?s?|sec(?:ond)?s?|s|m\b|km|k|metri|metres?|meters?)?",
+    re.IGNORECASE)
+
+
+def _value_to_seconds_or_meters(val, unit):
+    """Parse '5'/'90/'1:30'/'4km'/'400m' → (kind, amount) where kind is
+    'time' (seconds) or 'distance' (metres). Returns (None, None) if unclear."""
+    unit = (unit or "").lower().strip()
+    # mm:ss always means time
+    if ":" in val:
+        mm, ss = val.split(":", 1)
+        return "time", int(mm) * 60 + int(ss)
+    num = float(val)
+    if unit in ("'", "min", "mins", "minute", "minutes"):
+        return "time", num * 60
+    if unit in ('"', "s", "sec", "secs", "second", "seconds"):
+        return "time", num
+    if unit in ("km", "k"):
+        return "distance", num * 1000
+    if unit in ("m", "metri", "metre", "metres", "meter", "meters"):
+        return "distance", num
+    # No explicit unit: disambiguate by magnitude. ≤ 60 → minutes, else metres.
+    if num <= 60:
+        return "time", num * 60
+    return "distance", num
+
+
+def parse_structure_string(text):
+    """Parse a naming-convention string like '5x5'', '10x90\"', '5x4km p1''.
+
+    Returns a spec dict or None. Tolerant of warmup/cooldown words around it.
+    """
+    if not text:
+        return None
+    m = _DUR_RE.search(text)
+    if not m:
+        return None
+    kind, amount = _value_to_seconds_or_meters(m.group("val"), m.group("unit"))
+    if kind is None:
+        return None
+    spec = {
+        "itype": kind,
+        "rep_count": int(m.group("n")),
+        "rep_target": amount,
+        "recovery_target": None,
+        "source": "name",
+    }
+    rm = _REC_RE.search(text[m.end():])
+    if rm:
+        rkind, ramount = _value_to_seconds_or_meters(rm.group("val"), rm.group("unit"))
+        if rkind is not None:
+            spec["recovery_target"] = ramount
+    return spec
+
+
+def resolve_structure(record):
+    """Combine all structure signals, most authoritative first.
+
+    Order: user-typed structure → embedded workout → activity/workout name →
+    filename. Returns (spec_or_None, source_label).
+    """
+    # 1. explicit user override
+    spec = parse_structure_string(record.get("structure"))
+    if spec:
+        spec["source"] = "manual"
+        return spec, "manual"
+    # 2. embedded structured workout
+    planned = record.get("planned")
+    if planned and planned.get("rep_count"):
+        return planned, "workout"
+    # 3. a naming convention in the title / workout name / filename
+    for field in ("activity_name", "workout_name", "id"):
+        spec = parse_structure_string(record.get(field))
+        if spec:
+            spec["source"] = "name"
+            return spec, "name"
+    return None, "heuristic"
+
+
+# ════════════════════════════════════════════════════════════════════
 # Interval detection
 # ════════════════════════════════════════════════════════════════════
-def detect_intervals(laps, track):
-    """Classify laps into wu / cd / active / recovery and infer interval type.
+def detect_intervals(laps, track, spec=None, lap_types=None):
+    """Classify laps into wu / cd / active / recovery / drill and infer type.
+
+    Layered, most reliable signal first:
+      1. explicit per-lap overrides (lap_types) always win;
+      2. a known structure spec (manual / workout / name) matches laps to the
+         planned rep target — robust against drills and lap-button noise;
+      3. otherwise the legacy pace-ratio heuristic.
 
     Returns (classified_laps, itype) where itype is 'distance' | 'time' | None.
     classified_laps mirrors `laps` with an added 'type' (+ 'rep' for actives).
@@ -403,21 +614,98 @@ def detect_intervals(laps, track):
     """
     n = len(laps)
     out = [dict(lp) for lp in laps]
-    for lp in out:
-        lp["type"] = "active"  # provisional
+    lap_types = {int(k): v for k, v in (lap_types or {}).items()
+                 if str(v) in ("wu", "cd", "active", "recovery", "drill")}
 
-    paces = [pace_sec_km(lp["distance_m"], lp["duration_s"]) for lp in laps]
+    if spec and spec.get("rep_count"):
+        _classify_with_spec(out, spec)
+    else:
+        _classify_heuristic(out)
+
+    # Per-lap overrides win over everything.
+    for i, t in lap_types.items():
+        if 0 <= i < n:
+            out[i]["type"] = t
+
+    # Number the active reps in order.
+    rep = 0
+    for lp in out:
+        if lp["type"] == "active":
+            rep += 1
+            lp["rep"] = rep
+        else:
+            lp.pop("rep", None)
+
+    itype = (spec.get("itype") if spec and spec.get("itype")
+             else _classify_interval_type(out))
+    return out, itype
+
+
+def _lap_measure(lp, itype):
+    return lp["duration_s"] if itype == "time" else lp["distance_m"]
+
+
+def _classify_with_spec(out, spec):
+    """Match laps to a known planned set: the laps closest to the rep target
+    (and there should be rep_count of them) are the active reps; laps between
+    them are recovery; leading/trailing laps are warm-up / cool-down. Anything
+    near the start that does not match the target (e.g. drills, strides) stays
+    warm-up rather than being miscounted as a rep."""
+    itype = spec["itype"]
+    target = spec.get("rep_target")
+    count = spec.get("rep_count")
+
+    for lp in out:
+        lp["type"] = "wu"  # provisional; promoted below
+
+    # Score every lap by closeness to the target measure.
+    if target:
+        tol = 0.30  # ±30% — separates 400s from 800s, reps from recoveries/drills
+        scored = []
+        for i, lp in enumerate(out):
+            mv = _lap_measure(lp, itype)
+            if mv and abs(mv - target) <= tol * target:
+                scored.append((abs(mv - target), i))
+        scored.sort()
+        active_idx = sorted(i for _, i in scored[:count]) if count else sorted(i for _, i in scored)
+    else:
+        # No target: take the `count` fastest laps as the reps.
+        paces = [(pace_sec_km(lp["distance_m"], lp["duration_s"]), i)
+                 for i, lp in enumerate(out)]
+        paces = [(p, i) for p, i in paces if p is not None]
+        paces.sort()
+        active_idx = sorted(i for _, i in paces[:count]) if count else []
+
+    if not active_idx:
+        _classify_heuristic(out)
+        return
+
+    first, last = active_idx[0], active_idx[-1]
+    active_set = set(active_idx)
+    for i, lp in enumerate(out):
+        if i in active_set:
+            lp["type"] = "active"
+        elif i < first:
+            lp["type"] = "wu"
+        elif i > last:
+            lp["type"] = "cd"
+        else:
+            lp["type"] = "recovery"
+
+
+def _classify_heuristic(out):
+    """Legacy pace-ratio fallback when no structure is known."""
+    n = len(out)
+    for lp in out:
+        lp["type"] = "active"
+    paces = [pace_sec_km(lp["distance_m"], lp["duration_s"]) for lp in out]
     valid = [p for p in paces if p is not None]
     if not valid:
-        for lp in out:
-            lp["type"] = "active"
-        return out, None
+        return
     mean_pace = statistics.mean(valid)
     factor = config.DETECTION["active_pace_factor"]
 
     # Step 1 — warm-up / cool-down: slow laps at the extremities.
-    # A lap slower than mean*factor (higher sec/km) at either end is WU/CD;
-    # active reps sit below this threshold.
     threshold = mean_pace * factor
     first_fast = 0
     while first_fast < n and (paces[first_fast] is None or paces[first_fast] > threshold):
@@ -445,19 +733,8 @@ def detect_intervals(laps, track):
             out[nxt]["type"] = "recovery"
             i += 2
         else:
-            # Compare to window mean of fast laps to decide.
             out[idx]["type"] = "active" if p <= mean_pace else "recovery"
             i += 1
-
-    # number the active reps
-    rep = 0
-    for lp in out:
-        if lp["type"] == "active":
-            rep += 1
-            lp["rep"] = rep
-
-    itype = _classify_interval_type(out)
-    return out, itype
 
 
 def _classify_interval_type(classified):
@@ -641,6 +918,10 @@ def build_session_view(record, store):
         "sps_t": None, "sps_i": None,
         "inferred_target": None,
         "itype": None, "label": None,
+        "structure": record.get("structure"),
+        "structure_source": "heuristic",
+        "activity_name": record.get("activity_name"),
+        "workout_name": record.get("workout_name"),
         "warnings": [],
         "laps": [],
         "hr_trace": _subsample(trace, config.DETECTION["hr_trace_max_points"]),
@@ -657,7 +938,13 @@ def build_session_view(record, store):
         return view
 
     # --- interval pipeline ----------------------------------------------
-    classified, itype = detect_intervals(record["laps"], track)
+    spec, source = resolve_structure(record)
+    view["structure"] = record.get("structure")
+    view["structure_source"] = source       # manual | workout | name | heuristic
+    view["activity_name"] = record.get("activity_name")
+    view["workout_name"] = record.get("workout_name")
+    classified, itype = detect_intervals(record["laps"], track, spec,
+                                         record.get("lap_types"))
     view["itype"] = itype
     actives = [lp for lp in classified if lp["type"] == "active"]
 
@@ -763,7 +1050,7 @@ def build_session_view(record, store):
     view["laps"] = lap_views
 
     # --- session label ---------------------------------------------------
-    view["label"] = _build_label(actives, itype, track)
+    view["label"] = _build_label(actives, itype, track, spec)
 
     # --- session KPIs ----------------------------------------------------
     if rep_paces and len([p for p in rep_paces if p]) >= 2:
@@ -890,10 +1177,24 @@ def _compute_sps(view, rep_paces, rep_durations, hrr_values, rqs_values,
     return score
 
 
-def _build_label(actives, itype, track):
+def _build_label(actives, itype, track, spec=None):
     n = len(actives)
     if n == 0:
         return "Run"
+    # When the planned structure is known, label from it — exact and clean
+    # (e.g. "5×4 km" instead of a rounded "5×4002 m").
+    if spec and spec.get("rep_count") and spec.get("rep_target"):
+        rc = spec["rep_count"]
+        tv = spec["rep_target"]
+        if spec["itype"] == "time":
+            secs = int(round(tv))
+            if secs % 60 == 0:
+                return f"{rc}×{secs // 60} min"
+            return f"{rc}×{secs} s" if secs < 60 else f"{rc}×{secs // 60}:{secs % 60:02d} min"
+        m = int(round(tv))
+        if m >= 1000 and m % 1000 == 0:
+            return f"{rc}×{m // 1000} km"
+        return f"{rc}×{m} m"
     if itype == "time":
         mins = [round(lp["duration_s"] / 60.0) for lp in actives]
         if len(set(mins)) == 1:
@@ -1185,6 +1486,14 @@ def api_patch_session(sid):
         rec["track"] = bool(body["track"])
     if "theoretical_target" in body:
         rec["theoretical_target"] = body["theoretical_target"] or None
+    if "structure" in body:
+        rec["structure"] = (body["structure"] or "").strip() or None
+    if "lap_types" in body:
+        lt = body["lap_types"] or {}
+        if isinstance(lt, dict):
+            cleaned = {str(int(k)): v for k, v in lt.items()
+                       if str(v) in ("wu", "cd", "active", "recovery", "drill")}
+            rec["lap_types"] = cleaned
     save_store(store)
     return jsonify(build_session_view(rec, store))
 

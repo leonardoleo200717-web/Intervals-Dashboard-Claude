@@ -19,6 +19,7 @@ CLI:
 
 import argparse
 import io
+import json
 import os
 import sys
 import time
@@ -144,13 +145,33 @@ def download_activity(client, activity, output_dir):
                 target = os.path.join(output_dir, f"{stem}.fit")
                 with zf.open(n) as src, open(target, "wb") as dst:
                     dst.write(src.read())
+        _write_meta_sidecar(output_dir, stem, activity)
         return "downloaded"
     except zipfile.BadZipFile:
         # Some endpoints return the raw .fit directly.
         target = os.path.join(output_dir, f"{stem}.fit")
         with open(target, "wb") as dst:
             dst.write(data)
+        _write_meta_sidecar(output_dir, stem, activity)
         return "downloaded"
+
+
+def _write_meta_sidecar(output_dir, stem, activity):
+    """Save the Garmin activity title next to the FIT.
+
+    The exported FIT does not contain the title the user set in Garmin Connect,
+    so the dashboard reads it from "<stem>.meta.json" to let a naming
+    convention (e.g. "5x5'", "5x4km p1'") drive interval detection.
+    """
+    name = activity.get("activityName")
+    if not name:
+        return
+    try:
+        with open(os.path.join(output_dir, f"{stem}.meta.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"activity_name": name}, fh, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def sync(days=30, date_from=None, date_to=None, limit=None,

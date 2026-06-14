@@ -91,6 +91,17 @@ input[type=text],input[type=number]{font-family:inherit;font-size:13px}
 .flagrow{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin:14px 0}
 .flagrow label{display:flex;gap:6px;align-items:center;cursor:pointer}
 .target-input{padding:7px 10px;border:1px solid var(--line);border-radius:8px;width:90px}
+.target-input.wide{width:200px}
+.structure-box{margin:12px 0;display:flex;flex-direction:column;gap:8px}
+.structure-head{font-size:15px}
+.struct-label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.src-badge{font-size:11px;padding:2px 8px;border-radius:999px;background:#eee;color:#555;margin-left:6px}
+.src-badge.src-manual{background:#dff3ea;color:#127a57}
+.src-badge.src-workout{background:#dde9fb;color:#1f5fb0}
+.src-badge.src-name{background:#efe4fb;color:#7a3fb0}
+.src-badge.src-heuristic{background:#fdf0dc;color:#a9711a}
+.small{font-size:12px}
+.lap-type{padding:3px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px}
 .btn{padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--panel);font-weight:500}
 .btn.primary{background:var(--teal);color:#fff;border-color:var(--teal)}
 
@@ -401,6 +412,7 @@ function renderSession(s){
       <label>Theoretical target <input class="target-input" id="flag-target" placeholder="${s.itype==='time'?'mm:ss dur':'mm:ss /km'}" value="${s.theoretical_target||''}"></label>
       <a class="btn" href="/api/sessions/${s.id}/export.csv">⬇ Export CSV</a>
     </div>
+    ${isInterval?structureBox(s):''}
     <div class="grid cards">${kpis}</div>
 
     <h2>Heart rate over time</h2>
@@ -423,6 +435,10 @@ function renderSession(s){
   // flag handlers
   $('#flag-easy').onchange=patchFlags; $('#flag-track').onchange=patchFlags;
   $('#flag-target').onchange=patchFlags;
+  if(isInterval){
+    const si=$('#struct-input'); if(si) si.onchange=patchStructure;
+    document.querySelectorAll('.lap-type').forEach(sel=>sel.onchange=patchLapTypes);
+  }
   renderHrChart(s);
   if(isInterval) renderLapScoreChart(s);
   $('#chat-send').onclick=sendChat;
@@ -433,19 +449,51 @@ function decoupClass(d){ return d==null?'':(d<5?'good':d<8?'warn':'bad'); }
 
 async function patchFlags(){
   const body={ easy:$('#flag-easy').checked, track:$('#flag-track').checked, theoretical_target:$('#flag-target').value||null };
+  await patchAndRefresh(body);
+}
+
+const SRC_LABELS={manual:'from your override',workout:'from Garmin workout',name:'from the title/name',heuristic:'auto-guessed (pace)'};
+function sourceLabel(src){ return SRC_LABELS[src]||src||'—'; }
+
+function structureBox(s){
+  const title = s.activity_name||s.workout_name;
+  return `<div class="card structure-box">
+    <div class="structure-head"><b>Detected set:</b> ${s.label||'—'}
+      <span class="src-badge src-${s.structure_source}">${sourceLabel(s.structure_source)}</span></div>
+    <label class="struct-label">Override structure
+      <input id="struct-input" class="target-input wide" placeholder="e.g. 5x5' or 5x4km p1'" value="${s.structure||''}"></label>
+    <p class="muted small">Type the planned set to force detection (warm-up and cool-down are always excluded). Examples:
+      <code>10x400m</code> · <code>5x5'</code> · <code>10x90"</code> · <code>5x4km p1'</code>.
+      Or fix any single lap with the Type dropdown in the table below.${title?` Garmin title: <i>${escapeHtml(String(title))}</i>.`:''}</p>
+  </div>`;
+}
+
+async function patchStructure(){
+  await patchAndRefresh({ structure: $('#struct-input').value||null });
+}
+
+async function patchLapTypes(){
+  const map={};
+  document.querySelectorAll('.lap-type').forEach(sel=>{ map[sel.dataset.idx]=sel.value; });
+  await patchAndRefresh({ lap_types: map });
+}
+
+async function patchAndRefresh(body){
   const s=await (await fetch('/api/sessions/'+CURRENT.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   CURRENT=s; renderSession(s);
   await Promise.all([loadSessions(), loadWeekly(), loadAlerts()]);
 }
 
+const LAP_TYPE_OPTS=[['active','Active'],['recovery','Recovery'],['wu','Warm-up'],['cd','Cool-down'],['drill','Drill']];
 function lapTable(s){
-  const rows=s.laps.map(l=>{
+  const rows=s.laps.map((l,i)=>{
     const cls=l.type==='active'?'active-row':l.type==='recovery'?'recovery-row':'wucd-row';
     const label = l.type==='active'?('Rep '+l.rep):l.type==='recovery'?'recovery':l.type.toUpperCase();
     const dist = l.distance_std?`${l.distance_std} m`:`${Math.round(l.distance_m)} m`;
-    return `<tr class="${cls}"><td>${label}</td><td>${dist}</td><td>${Math.round(l.duration_s)}s</td><td class="mono">${l.pace_fmt||'—'}</td><td>${num(l.hr_avg,0)}</td><td>${l.ea??'—'}</td><td>${l.cardiac_cost??'—'}</td><td>${l.hrr60??(l.rqs!=null?l.rqs+'%':'—')}</td><td>${l.delta_t??'—'}</td><td>${l.delta_i??'—'}</td><td>${l.lap_score??'—'}</td></tr>`;
+    const sel=`<select class="lap-type" data-idx="${i}">`+LAP_TYPE_OPTS.map(([v,t])=>`<option value="${v}" ${l.type===v?'selected':''}>${t}</option>`).join('')+`</select>`;
+    return `<tr class="${cls}"><td>${label}</td><td>${sel}</td><td>${dist}</td><td>${Math.round(l.duration_s)}s</td><td class="mono">${l.pace_fmt||'—'}</td><td>${num(l.hr_avg,0)}</td><td>${l.ea??'—'}</td><td>${l.cardiac_cost??'—'}</td><td>${l.hrr60??(l.rqs!=null?l.rqs+'%':'—')}</td><td>${l.delta_t??'—'}</td><td>${l.delta_i??'—'}</td><td>${l.lap_score??'—'}</td></tr>`;
   }).join('');
-  return `<table><thead><tr><th>Lap</th><th>Dist</th><th>Time</th><th>Pace</th><th>HR</th><th>EA</th><th>Card.cost</th><th>HRR60/RQS</th><th>Δ tgt</th><th>Δ inf</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table><thead><tr><th>Lap</th><th>Type</th><th>Dist</th><th>Time</th><th>Pace</th><th>HR</th><th>EA</th><th>Card.cost</th><th>HRR60/RQS</th><th>Δ tgt</th><th>Δ inf</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderHrChart(s){
