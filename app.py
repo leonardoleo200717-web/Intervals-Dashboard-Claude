@@ -668,13 +668,19 @@ def _classify_with_spec(out, spec):
     # Score every lap by closeness to the target measure.
     if target:
         tol = 0.30  # ±30% — separates 400s from 800s, reps from recoveries/drills
-        scored = []
-        for i, lp in enumerate(out):
-            mv = _lap_measure(lp, itype)
-            if mv and abs(mv - target) <= tol * target:
-                scored.append((abs(mv - target), i))
-        scored.sort()
-        active_idx = sorted(i for _, i in scored[:count]) if count else sorted(i for _, i in scored)
+        matched = [i for i, lp in enumerate(out)
+                   if _lap_measure(lp, itype) and
+                   abs(_lap_measure(lp, itype) - target) <= tol * target]
+        if count and len(matched) > count:
+            # More laps match the target than there are planned reps — happens
+            # when recoveries or drills share the rep distance (e.g. 200 m hard
+            # / 200 m float). The reps are the faster efforts, so keep the
+            # fastest `count` matched laps as the actives.
+            matched.sort(key=lambda i: (pace_sec_km(out[i]["distance_m"],
+                                                    out[i]["duration_s"]) or 1e9))
+            active_idx = sorted(matched[:count])
+        else:
+            active_idx = sorted(matched)
     else:
         # No target: take the `count` fastest laps as the reps.
         paces = [(pace_sec_km(lp["distance_m"], lp["duration_s"]), i)
@@ -1224,7 +1230,7 @@ def _build_label(actives, itype, track, spec=None):
             secs = int(round(tv))
             if secs % 60 == 0:
                 return f"{rc}×{secs // 60} min"
-            return f"{rc}×{secs} s" if secs < 60 else f"{rc}×{secs // 60}:{secs % 60:02d} min"
+            return f"{rc}×{secs} s" if secs < 60 else f"{rc}×{secs // 60}:{secs % 60:02d}"
         m = int(round(tv))
         if m >= 1000 and m % 1000 == 0:
             return f"{rc}×{m // 1000} km"
