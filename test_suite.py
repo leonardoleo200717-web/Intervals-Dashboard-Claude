@@ -288,6 +288,71 @@ check("C13 no-target spec picks 3", sum(1 for l in out8 if l["type"] == "active"
       sum(1 for l in out8 if l["type"] == "active"))
 
 
+# --- Garmin per-lap intensity markers (read straight from the FIT) -----
+def lap_i(d, t, intensity, hr=160):
+    lp = lap(d, t, hr)
+    lp["intensity"] = intensity
+    return lp
+
+# C14: intensity markers classify wu/active/recovery/cd with NO spec at all
+ilaps = [lap_i(2000, 600, "warmup", 130),
+         lap_i(400, 90, "active", 175), lap_i(200, 80, "rest", 140),
+         lap_i(400, 91, "active", 176), lap_i(200, 82, "rest", 141),
+         lap_i(400, 92, "active", 177), lap_i(200, 81, "rest", 140),
+         lap_i(1500, 480, "cooldown", 125)]
+o14, _ = app.detect_intervals(ilaps, True, None)
+check("C14 intensity finds 3 reps (no spec)",
+      sum(1 for l in o14 if l["type"] == "active") == 3,
+      [l["type"] for l in o14])
+check("C14b intensity WU first", o14[0]["type"] == "wu", o14[0]["type"])
+check("C14c intensity CD last", o14[-1]["type"] == "cd", o14[-1]["type"])
+check("C14d intensity rests are recovery",
+      o14[2]["type"] == "recovery" and o14[4]["type"] == "recovery")
+
+# C15: drills tagged warmup stay out even when same distance as the reps
+dlaps = [lap_i(2000, 600, "warmup", 130),
+         lap_i(400, 110, "warmup", 150), lap_i(400, 112, "warmup", 150),  # strides/drills
+         lap_i(400, 90, "active", 175), lap_i(200, 80, "rest", 140),
+         lap_i(400, 91, "active", 176), lap_i(200, 82, "rest", 141),
+         lap_i(1500, 480, "cooldown", 125)]
+o15, _ = app.detect_intervals(dlaps, True, None)
+check("C15 same-distance drills excluded",
+      sum(1 for l in o15 if l["type"] == "active") == 2,
+      [l["type"] for l in o15])
+
+# C16: all-active markers are NOT meaningful (plain free run) → heuristic
+flat = [lap_i(400, 90, "active") for _ in range(5)]
+check("C16 all-active not meaningful", app._has_meaningful_lap_intensity(flat) is False)
+check("C16b mixed markers are meaningful", app._has_meaningful_lap_intensity(ilaps) is True)
+
+# C17: a slow-but-tagged rep stays active (intensity beats pace guessing)
+slow = [lap_i(2000, 600, "warmup", 130),
+        lap_i(400, 90, "active", 175), lap_i(200, 80, "rest", 140),
+        lap_i(400, 130, "active", 165), lap_i(200, 82, "rest", 141),  # tired/slow rep
+        lap_i(400, 91, "active", 176), lap_i(200, 81, "rest", 140),
+        lap_i(1500, 480, "cooldown", 125)]
+o17, _ = app.detect_intervals(slow, True, None)
+check("C17 slow tagged rep kept active",
+      o17[3]["type"] == "active" and sum(1 for l in o17 if l["type"] == "active") == 3,
+      [l["type"] for l in o17])
+
+# C18: a typed (manual) structure still overrides intensity markers, but a
+# title-derived (name) one does not — device markers are more reliable.
+manual18 = app.parse_structure_string("2x400m"); manual18["source"] = "manual"
+o18, _ = app.detect_intervals(ilaps, True, manual18)
+check("C18 manual spec overrides intensity",
+      sum(1 for l in o18 if l["type"] == "active") == 2,
+      sum(1 for l in o18 if l["type"] == "active"))
+o18b, _ = app.detect_intervals(ilaps, True, app.parse_structure_string("2x400m"))
+check("C18b name spec does NOT override intensity (device wins)",
+      sum(1 for l in o18b if l["type"] == "active") == 3,
+      sum(1 for l in o18b if l["type"] == "active"))
+
+# C19: per-lap override still wins over intensity
+o19, _ = app.detect_intervals(ilaps, True, None, {"1": "drill"})
+check("C19 per-lap override beats intensity", o19[1]["type"] == "drill", o19[1]["type"])
+
+
 # ════════════════════════════════════════════════════════════════════
 # GROUP D — KPI engine
 # ════════════════════════════════════════════════════════════════════
