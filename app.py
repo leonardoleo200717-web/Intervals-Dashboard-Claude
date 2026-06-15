@@ -248,6 +248,11 @@ def parse_fit(path):
                 "hr_avg": _get(msg, "avg_heart_rate"),
                 "max_hr": _get(msg, "max_heart_rate"),
                 "lap_trigger": normalize_enum(_get(msg, "lap_trigger"), LapTrigger),
+                # Garmin tags every recorded lap with its role when the run
+                # followed a structured workout: warmup / active / rest /
+                # cooldown / recovery / interval. This is the device's own
+                # ground truth — far more reliable than guessing from pace.
+                "intensity": normalize_enum(_get(msg, "intensity"), Intensity),
                 "start_time": to_epoch_seconds(_get(msg, "start_time")),
             })
         elif isinstance(msg, RecordMessage):
@@ -611,9 +616,13 @@ def detect_intervals(laps, track, spec=None, lap_types=None):
 
     Layered, most reliable signal first:
       1. explicit per-lap overrides (lap_types) always win;
-      2. a known structure spec (manual / workout / name) matches laps to the
-         planned rep target — robust against drills and lap-button noise;
-      3. otherwise the legacy pace-ratio heuristic.
+      2. a structure the user typed by hand (manual spec) — explicit intent;
+      3. Garmin's own per-lap intensity markers recorded in the FIT
+         (warmup / active / rest / cooldown …) — the device ground truth,
+         so warm-up, cool-down and drills are tagged at the source, not guessed;
+      4. a structure inferred from a workout plan or the activity title, matched
+         to the planned rep target;
+      5. otherwise the legacy pace-ratio heuristic.
 
     Returns (classified_laps, itype) where itype is 'distance' | 'time' | None.
     classified_laps mirrors `laps` with an added 'type' (+ 'rep' for actives).
@@ -624,7 +633,12 @@ def detect_intervals(laps, track, spec=None, lap_types=None):
     lap_types = {int(k): v for k, v in (lap_types or {}).items()
                  if str(v) in ("wu", "cd", "active", "recovery", "drill")}
 
-    if spec and spec.get("rep_count"):
+    manual_spec = bool(spec and spec.get("source") == "manual" and spec.get("rep_count"))
+    if manual_spec:
+        _classify_with_spec(out, spec)
+    elif _has_meaningful_lap_intensity(out):
+        _classify_with_lap_intensity(out)
+    elif spec and spec.get("rep_count"):
         _classify_with_spec(out, spec)
     else:
         _classify_heuristic(out)
@@ -648,6 +662,62 @@ def detect_intervals(laps, track, spec=None, lap_types=None):
     return out, itype
 
 
+# Garmin lap-intensity tokens → our lap roles.
+_INTENSITY_TO_TYPE = {
+    "warmup": "wu",
+    "cooldown": "cd",
+    "rest": "recovery",
+    "recovery": "recovery",
+    "active": "active",
+    "interval": "active",
+}
+
+
+def _has_meaningful_lap_intensity(laps):
+    """True when the FIT carries usable per-lap intensity markers.
+
+    A plain free run leaves every lap 'active' (or blank), which tells us
+    nothing. We only trust this signal when the laps actually distinguish work
+    from rest/warm-up — i.e. at least one active lap AND at least one
+    warm-up / cool-down / rest lap.
+    """
+    vals = [lp.get("intensity") for lp in laps]
+    vals = [v for v in vals if v in _INTENSITY_TO_TYPE]
+    if len(vals) < 2:
+        return False
+    has_active = any(_INTENSITY_TO_TYPE[v] == "active" for v in vals)
+    has_other = any(_INTENSITY_TO_TYPE[v] in ("wu", "cd", "recovery") for v in vals)
+    return has_active and has_other
+
+
+def _classify_with_lap_intensity(out):
+    """Classify straight from Garmin's recorded per-lap intensity markers.
+
+    No pace guessing: the watch already tagged each lap when the run followed a
+    structured workout. Laps with an unknown/blank marker are filled by their
+    position — before the first active lap they are warm-up, after the last they
+    are cool-down, in between they are recovery.
+    """
+    for lp in out:
+        lp["type"] = _INTENSITY_TO_TYPE.get(lp.get("intensity"))
+
+    active_idx = [i for i, lp in enumerate(out) if lp["type"] == "active"]
+    if not active_idx:
+        _classify_heuristic(out)
+        return
+
+    first, last = active_idx[0], active_idx[-1]
+    for i, lp in enumerate(out):
+        if lp["type"]:
+            continue
+        if i < first:
+            lp["type"] = "wu"
+        elif i > last:
+            lp["type"] = "cd"
+        else:
+            lp["type"] = "recovery"
+
+
 def _lap_measure(lp, itype):
     return lp["duration_s"] if itype == "time" else lp["distance_m"]
 
@@ -668,13 +738,19 @@ def _classify_with_spec(out, spec):
     # Score every lap by closeness to the target measure.
     if target:
         tol = 0.30  # ±30% — separates 400s from 800s, reps from recoveries/drills
-        scored = []
-        for i, lp in enumerate(out):
-            mv = _lap_measure(lp, itype)
-            if mv and abs(mv - target) <= tol * target:
-                scored.append((abs(mv - target), i))
-        scored.sort()
-        active_idx = sorted(i for _, i in scored[:count]) if count else sorted(i for _, i in scored)
+        matched = [i for i, lp in enumerate(out)
+                   if _lap_measure(lp, itype) and
+                   abs(_lap_measure(lp, itype) - target) <= tol * target]
+        if count and len(matched) > count:
+            # More laps match the target than there are planned reps — happens
+            # when recoveries or drills share the rep distance (e.g. 200 m hard
+            # / 200 m float). The reps are the faster efforts, so keep the
+            # fastest `count` matched laps as the actives.
+            matched.sort(key=lambda i: (pace_sec_km(out[i]["distance_m"],
+                                                    out[i]["duration_s"]) or 1e9))
+            active_idx = sorted(matched[:count])
+        else:
+            active_idx = sorted(matched)
     else:
         # No target: take the `count` fastest laps as the reps.
         paces = [(pace_sec_km(lp["distance_m"], lp["duration_s"]), i)
@@ -948,8 +1024,12 @@ def build_session_view(record, store):
 
     # --- interval pipeline ----------------------------------------------
     spec, source = resolve_structure(record)
+    # When no explicit/inferred structure applies but the FIT carries Garmin's
+    # own per-lap intensity markers, that is what actually drives detection.
+    if source == "heuristic" and _has_meaningful_lap_intensity(record["laps"]):
+        source = "garmin"
     view["structure"] = record.get("structure")
-    view["structure_source"] = source       # manual | workout | name | heuristic
+    view["structure_source"] = source       # manual | workout | name | garmin | heuristic
     view["activity_name"] = record.get("activity_name")
     view["workout_name"] = record.get("workout_name")
     classified, itype = detect_intervals(record["laps"], track, spec,
@@ -1224,7 +1304,7 @@ def _build_label(actives, itype, track, spec=None):
             secs = int(round(tv))
             if secs % 60 == 0:
                 return f"{rc}×{secs // 60} min"
-            return f"{rc}×{secs} s" if secs < 60 else f"{rc}×{secs // 60}:{secs % 60:02d} min"
+            return f"{rc}×{secs} s" if secs < 60 else f"{rc}×{secs // 60}:{secs % 60:02d}"
         m = int(round(tv))
         if m >= 1000 and m % 1000 == 0:
             return f"{rc}×{m // 1000} km"

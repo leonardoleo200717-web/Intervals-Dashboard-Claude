@@ -99,6 +99,7 @@ input[type=text],input[type=number]{font-family:inherit;font-size:13px}
 .src-badge.src-manual{background:#dff3ea;color:#127a57}
 .src-badge.src-workout{background:#dde9fb;color:#1f5fb0}
 .src-badge.src-name{background:#efe4fb;color:#7a3fb0}
+.src-badge.src-garmin{background:#d8eef0;color:#0f7d8c}
 .src-badge.src-heuristic{background:#fdf0dc;color:#a9711a}
 .small{font-size:12px}
 .lap-type{padding:3px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px}
@@ -517,7 +518,7 @@ async function patchFlags(){
   await patchAndRefresh(body);
 }
 
-const SRC_LABELS={manual:'from your override',workout:'from Garmin workout',name:'from the title/name',heuristic:'auto-guessed (pace)'};
+const SRC_LABELS={manual:'from your override',workout:'from Garmin workout',name:'from the title/name',garmin:'from Garmin lap markers',heuristic:'auto-guessed (pace)'};
 function sourceLabel(src){ return SRC_LABELS[src]||src||'—'; }
 
 function structureBox(s){
