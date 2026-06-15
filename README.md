@@ -98,21 +98,26 @@ L'architettura non lo preclude (container cron che esegue `garmin_sync.py` ogni 
 
 Ogni schermata di **dettaglio sessione** ha in fondo un pannello **AI coach**: puoi fare domande in linguaggio naturale sulla sessione (es. *"Quanto è stato regolare il mio ritmo?"*, *"Come si confronta con le ultime ripetute uguali?"*). Funziona così, passo per passo:
 
-**Passo 1 — ottieni una chiave API Anthropic.** Crea un account su [console.anthropic.com](https://console.anthropic.com), genera una API key (inizia con `sk-ant-...`).
+**Passo 1 — ottieni una o più chiavi API.** Puoi scegliere tra più provider e decidere di volta in volta quale modello interrogare. Configurane almeno uno:
+- **Anthropic (Claude):** [console.anthropic.com](https://console.anthropic.com) → API key (`sk-ant-...`)
+- **DeepSeek:** [platform.deepseek.com](https://platform.deepseek.com) → API key
+- **OpenAI:** [platform.openai.com](https://platform.openai.com) → API key
 
-**Passo 2 — inseriscila nel file `.env`** e riavvia `python app.py`:
+**Passo 2 — inserisci le chiavi nel file `.env`** (solo quelle che hai) e riavvia `python app.py`:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=...
+OPENAI_API_KEY=...
 ```
 
-**Passo 3 — usa la chat.** Apri una sessione → pannello **AI coach** in fondo → scrivi e premi Invio (o **Send**). La risposta arriva **in streaming, token per token**. Il pulsante **Clear** azzera la conversazione (la cronologia è tenuta lato browser, per sessione, e inviata a ogni domanda per dare contesto).
+**Passo 3 — usa la chat.** Apri una sessione → pannello **AI coach** in fondo. In alto c'è un menu **Model**: elenca solo i provider/modelli per cui hai messo una chiave, raggruppati per provider (Claude, DeepSeek, OpenAI). Scegli il modello, scrivi e premi Invio (o **Send**). La risposta arriva **in streaming, token per token**. Il pulsante **Clear** azzera la conversazione (la cronologia è tenuta lato browser, per sessione, e inviata a ogni domanda per dare contesto). Comodo quando un provider è sovraccarico (`overloaded`): cambi modello e prosegui.
 
-**Cosa viene inviato all'AI.** Per rispondere con numeri reali, il server costruisce il contesto con: metadati e flag della sessione, tutti i KPI, la tabella per-lap compatta, il tuo profilo da `config.py` (zone HR, ritmi target) e le ultime 5 sessioni con la stessa etichetta. Sotto al pannello è mostrato l'avviso: *"Your session data is sent to the AI provider to generate this response."*
+**Cosa viene inviato all'AI.** Per rispondere con numeri reali, il server costruisce il contesto con: metadati e flag della sessione, tutti i KPI, la tabella per-lap compatta, il tuo profilo da `config.py` (zone HR, ritmi target) e le ultime 5 sessioni con la stessa etichetta. Sotto al pannello è mostrato l'avviso: *"Your session data is sent to the selected AI provider to generate this response."*
 
-**Privacy e sicurezza.** La chiave vive **solo lato server** (`.env`), non viene mai esposta nel browser: il browser parla solo con il tuo Flask, che a sua volta chiama Anthropic. Senza chiave configurata la chat mostra esattamente *"AI not configured — add ANTHROPIC_API_KEY to .env"* e non viene inviato nulla.
+**Privacy e sicurezza.** Le chiavi vivono **solo lato server** (`.env`), non vengono mai esposte nel browser: il browser parla solo con il tuo Flask, che a sua volta chiama il provider scelto. Senza nessuna chiave configurata la chat mostra il messaggio *"AI not configured"* e non viene inviato nulla.
 
-> Modello usato: `claude-sonnet-4-6` (impostato in `app.py`, costante `CHAT_MODEL`).
+> Provider e modelli sono definiti in `config.py` (`AI_PROVIDERS`); il default è Anthropic `claude-sonnet-4-6`. I provider stile OpenAI (DeepSeek, OpenAI e qualsiasi endpoint compatibile) usano lo stesso percorso di codice — basta aggiungerli al registro.
 
 ## Struttura
 

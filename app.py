@@ -5,7 +5,8 @@ Responsibilities:
   * Compute the full KPI suite (session, per-lap, weekly).
   * Persist sessions to sessions.json with atomic writes.
   * Expose the REST API consumed by static/index.html.
-  * Proxy the AI chatbot to the Anthropic API (key stays server-side).
+  * Proxy the AI chatbot to a chosen provider — Anthropic (Claude), DeepSeek
+    or any OpenAI-compatible API — with the key kept server-side only.
 
 Design note: the immutable parsed data (meta, raw laps, HR trace and a few
 flag-independent scalars) is stored per session. Everything KPI-shaped is
@@ -19,6 +20,8 @@ import math
 import os
 import statistics
 import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory, Response
@@ -78,9 +81,11 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB — allow batch uploads
 
-# Anthropic model for the AI chat. The spec's claude-sonnet-4-20250514 (Sonnet 4.0)
-# retires 2026-06-15; this is the current Sonnet ("or newer" per CLAUDE.md §13).
-CHAT_MODEL = "claude-sonnet-4-6"
+# Default Anthropic model for the AI chat (the spec's claude-sonnet-4-20250514
+# / Sonnet 4.0 retires 2026-06-15; this is the current Sonnet, "or newer" per
+# CLAUDE.md §13). The full provider/model registry lives in config.AI_PROVIDERS;
+# this stays as the Anthropic fallback when no model is requested.
+CHAT_MODEL = config.AI_PROVIDERS["anthropic"]["default_model"]
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -1700,35 +1705,113 @@ def api_export_csv(sid):
 
 
 # ── AI chatbot proxy ────────────────────────────────────────────────
+def configured_ai_providers():
+    """Provider ids whose API key is present in the environment."""
+    return [pid for pid, p in config.AI_PROVIDERS.items()
+            if os.getenv(p["env_key"])]
+
+
+def _resolve_ai(body):
+    """Pick the provider/model for a chat request.
+
+    Returns (provider_def, key, model) or (None, error_message, status_code)
+    so callers can fail honestly (CLAUDE.md §13): missing provider/key never
+    fakes a success.
+    """
+    requested = body.get("provider")
+    pid = requested or config.DEFAULT_AI_PROVIDER
+    provider = config.AI_PROVIDERS.get(pid)
+    # Fall back to the first configured provider when the id is unknown, or when
+    # we're falling back to the default (no explicit request) and the default
+    # has no key. An *explicit* request for an unkeyed provider still 503s below.
+    if provider is None or (not requested and not os.getenv(provider["env_key"])):
+        avail = configured_ai_providers()
+        if not avail:
+            return None, "AI not configured — add a provider API key to .env", 503
+        pid = avail[0]
+        provider = config.AI_PROVIDERS[pid]
+    key = os.getenv(provider["env_key"])
+    if not key:
+        return None, (f"AI not configured — add {provider['env_key']} to .env "
+                      f"for {provider['label']}"), 503
+    model = body.get("model") or provider["default_model"]
+    return provider, key, model
+
+
+def _openai_payload(model, system, messages):
+    return json.dumps({
+        "model": model,
+        "max_tokens": config.AI_MAX_TOKENS,
+        "messages": [{"role": "system", "content": system}] + messages,
+    }).encode("utf-8")
+
+
+def _openai_request(provider, key, body_bytes, stream):
+    """Build the urllib request for an OpenAI-compatible /chat/completions call."""
+    if stream:
+        # re-encode with stream:true
+        payload = json.loads(body_bytes)
+        payload["stream"] = True
+        body_bytes = json.dumps(payload).encode("utf-8")
+    url = provider["base_url"].rstrip("/") + "/chat/completions"
+    return urllib.request.Request(url, data=body_bytes, headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }, method="POST")
+
+
+def _openai_error_text(exc):
+    """Pull a readable message out of an HTTPError body when possible."""
+    try:
+        detail = json.loads(exc.read().decode("utf-8", "replace"))
+        return detail.get("error", {}).get("message") or str(exc)
+    except Exception:
+        return str(exc)
+
+
+def _anthropic_reply(key, model, system, messages):
+    import anthropic
+    client = anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(
+        model=model, max_tokens=config.AI_MAX_TOKENS,
+        system=system, messages=messages)
+    return next((b.text for b in msg.content if b.type == "text"), "")
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        return jsonify({"error": "AI not configured — add ANTHROPIC_API_KEY to .env"}), 503
-    try:
-        import anthropic
-    except ImportError:
-        return jsonify({"error": "AI not configured — anthropic package not installed"}), 503
-
     body = request.get_json(silent=True) or {}
     store = load_store()
     sid = body.get("session_id")
     if not sid or sid not in store:
         return jsonify({"error": "session not found"}), 404
+
+    resolved = _resolve_ai(body)
+    if resolved[0] is None:
+        _, err, status = resolved
+        return jsonify({"error": err}), status
+    provider, key, model = resolved
+
     view = build_session_view(store[sid], store)
     system = build_context_prompt(view, store)
+    messages = body.get("history", []) + [
+        {"role": "user", "content": body.get("message", "")}]
 
     try:
-        client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model=CHAT_MODEL,
-            max_tokens=500,
-            system=system,
-            messages=body.get("history", []) + [
-                {"role": "user", "content": body.get("message", "")}],
-        )
-        reply = next((b.text for b in msg.content if b.type == "text"), "")
+        if provider["kind"] == "anthropic":
+            try:
+                reply = _anthropic_reply(key, model, system, messages)
+            except ImportError:
+                return jsonify({"error": "AI not configured — anthropic package not installed"}), 503
+        else:
+            req = _openai_request(provider, key,
+                                  _openai_payload(model, system, messages), stream=False)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            reply = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
         return jsonify({"reply": reply})
+    except urllib.error.HTTPError as exc:
+        return jsonify({"error": f"AI request failed: {_openai_error_text(exc)}"}), 502
     except Exception as exc:
         return jsonify({"error": f"AI request failed: {exc}"}), 502
 
@@ -1736,19 +1819,18 @@ def chat():
 @app.route("/api/chat/stream", methods=["POST"])
 def chat_stream():
     """SSE streaming variant of /api/chat (Phase 2)."""
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        return jsonify({"error": "AI not configured — add ANTHROPIC_API_KEY to .env"}), 503
-    try:
-        import anthropic
-    except ImportError:
-        return jsonify({"error": "AI not configured — anthropic package not installed"}), 503
-
     body = request.get_json(silent=True) or {}
     store = load_store()
     sid = body.get("session_id")
     if not sid or sid not in store:
         return jsonify({"error": "session not found"}), 404
+
+    resolved = _resolve_ai(body)
+    if resolved[0] is None:
+        _, err, status = resolved
+        return jsonify({"error": err}), status
+    provider, key, model = resolved
+
     view = build_session_view(store[sid], store)
     system = build_context_prompt(view, store)
     messages = body.get("history", []) + [
@@ -1756,14 +1838,40 @@ def chat_stream():
 
     def generate():
         try:
-            client = anthropic.Anthropic(api_key=key)
-            with client.messages.stream(
-                model=CHAT_MODEL, max_tokens=500,
-                system=system, messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    yield f"data: {json.dumps({'delta': text})}\n\n"
+            if provider["kind"] == "anthropic":
+                try:
+                    import anthropic
+                except ImportError:
+                    yield f"data: {json.dumps({'error': 'AI not configured — anthropic package not installed'})}\n\n"
+                    return
+                client = anthropic.Anthropic(api_key=key)
+                with client.messages.stream(
+                    model=model, max_tokens=config.AI_MAX_TOKENS,
+                    system=system, messages=messages,
+                ) as stream:
+                    for text in stream.text_stream:
+                        yield f"data: {json.dumps({'delta': text})}\n\n"
+            else:
+                req = _openai_request(provider, key,
+                                      _openai_payload(model, system, messages), stream=True)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    for raw in resp:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            evt = json.loads(chunk)
+                        except ValueError:
+                            continue
+                        delta = (evt.get("choices") or [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
+        except urllib.error.HTTPError as exc:
+            yield f"data: {json.dumps({'error': f'AI request failed: {_openai_error_text(exc)}'})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': f'AI request failed: {exc}'})}\n\n"
 
@@ -1912,7 +2020,26 @@ def public_config():
         "acwr_alert": th["acwr_alert"],
         "easy_ratio_target": th["easy_ratio_target"],
         "weekly_increase_alert": th["weekly_increase_alert"],
+        "ai_providers": _public_ai_providers(),
+        "ai_default": (config.DEFAULT_AI_PROVIDER
+                       if os.getenv(config.AI_PROVIDERS[config.DEFAULT_AI_PROVIDER]["env_key"])
+                       else (configured_ai_providers() or [None])[0]),
     }
+
+
+def _public_ai_providers():
+    """Provider/model list for the chat dropdown — only the keyed ones, and
+    never the API keys themselves (those stay server-side)."""
+    out = []
+    for pid in configured_ai_providers():
+        p = config.AI_PROVIDERS[pid]
+        out.append({
+            "id": pid,
+            "label": p["label"],
+            "models": p["models"],
+            "default_model": p["default_model"],
+        })
+    return out
 
 
 def build_context_prompt(view, store):
