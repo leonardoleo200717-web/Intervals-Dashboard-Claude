@@ -595,7 +595,6 @@ check("G27 openai payload shape",
 for v in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
     os.environ.pop(v, None)
 
-
 # ════════════════════════════════════════════════════════════════════
 # GROUP H — Adversarial / edge / regression
 # ════════════════════════════════════════════════════════════════════
