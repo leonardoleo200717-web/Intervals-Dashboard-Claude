@@ -66,3 +66,48 @@ ROUNDING_TABLE = [
     (1500, 1460, 1540, 1350, 1749),
     (2000, 1960, 2040, 1750, 2499),
 ]
+
+# ── AI chat providers ─────────────────────────────────────────────────
+# The AI coach can talk to any of these. Each provider's API key lives in
+# .env (key name below) and is read server-side only — never sent to the
+# browser. Only providers whose key is actually set are offered in the UI.
+#
+#   kind = "anthropic"  → native Anthropic SDK (top-level system prompt)
+#   kind = "openai"     → OpenAI-compatible /chat/completions (DeepSeek,
+#                         OpenAI, Groq, Together, OpenRouter, Ollama, …);
+#                         only base_url + key + model name differ.
+#
+# `models` is the curated dropdown list; the backend also accepts any other
+# model string the client sends, so the list can stay short without locking
+# you in. `default_model` is the pre-selected one.
+AI_PROVIDERS = {
+    "anthropic": {
+        "label": "Claude (Anthropic)",
+        "kind": "anthropic",
+        "env_key": "ANTHROPIC_API_KEY",
+        "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+        "default_model": "claude-sonnet-4-6",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "kind": "openai",
+        "env_key": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "default_model": "deepseek-chat",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "kind": "openai",
+        "env_key": "OPENAI_API_KEY",
+        "base_url": "https://api.openai.com/v1",
+        "models": ["gpt-4o-mini", "gpt-4o"],
+        "default_model": "gpt-4o-mini",
+    },
+}
+
+# Pre-selected provider when several are configured.
+DEFAULT_AI_PROVIDER = "anthropic"
+
+# Cap on the AI reply length (tokens), shared by every provider.
+AI_MAX_TOKENS = 500

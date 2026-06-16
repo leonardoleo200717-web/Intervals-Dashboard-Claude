@@ -551,6 +551,49 @@ check("G22 PATCH empty body ok", c.patch("/api/sessions/a1", json={}).status_cod
 view_a1 = app.build_session_view(app.load_store()["a1"], app.load_store())
 check("G23 chat context prompt builds", isinstance(app.build_context_prompt(view_a1, app.load_store()), str))
 
+# --- multi-provider AI selection (no real network calls) ---------------
+# No keys at all: nothing offered, default is None.
+for v in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
+    os.environ.pop(v, None)
+check("G24 no providers configured", app.configured_ai_providers() == [])
+cfg0 = c.get("/api/config").get_json()
+check("G24b config ai_providers empty", cfg0.get("ai_providers") == [] and cfg0.get("ai_default") is None,
+      (cfg0.get("ai_providers"), cfg0.get("ai_default")))
+
+# Only DeepSeek keyed: it is offered, becomes the effective default, and
+# _resolve_ai falls back to it even though DEFAULT_AI_PROVIDER is anthropic.
+os.environ["DEEPSEEK_API_KEY"] = "sk-test-deepseek"
+check("G25 deepseek listed", app.configured_ai_providers() == ["deepseek"], app.configured_ai_providers())
+cfg1 = c.get("/api/config").get_json()
+check("G25b config offers deepseek only",
+      [p["id"] for p in cfg1["ai_providers"]] == ["deepseek"] and cfg1["ai_default"] == "deepseek",
+      cfg1.get("ai_default"))
+check("G25c no API key leaked", all("env_key" not in p and "key" not in p for p in cfg1["ai_providers"]))
+prov, key, model = app._resolve_ai({})
+check("G25d resolve falls back to deepseek",
+      prov["kind"] == "openai" and key == "sk-test-deepseek" and model == "deepseek-chat",
+      (prov.get("kind"), model))
+
+# Explicit provider + model in the request is honoured; missing key → 503.
+os.environ["ANTHROPIC_API_KEY"] = "sk-test-anthropic"
+prov2, key2, model2 = app._resolve_ai({"provider": "anthropic", "model": "claude-opus-4-8"})
+check("G26 explicit provider/model honoured",
+      prov2["kind"] == "anthropic" and key2 == "sk-test-anthropic" and model2 == "claude-opus-4-8",
+      (prov2.get("kind"), model2))
+r_no_key = app._resolve_ai({"provider": "openai"})
+check("G26b unkeyed provider → 503", r_no_key[0] is None and r_no_key[2] == 503 and "OPENAI_API_KEY" in r_no_key[1],
+      r_no_key)
+
+# OpenAI-compatible payload puts the system prompt as a leading message.
+payload = json.loads(app._openai_payload("deepseek-chat", "SYS", [{"role": "user", "content": "hi"}]))
+check("G27 openai payload shape",
+      payload["model"] == "deepseek-chat" and payload["messages"][0] == {"role": "system", "content": "SYS"}
+      and payload["messages"][1]["content"] == "hi",
+      payload)
+
+# Clean up so later groups see no AI keys.
+for v in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
+    os.environ.pop(v, None)
 
 # ════════════════════════════════════════════════════════════════════
 # GROUP H — Adversarial / edge / regression
