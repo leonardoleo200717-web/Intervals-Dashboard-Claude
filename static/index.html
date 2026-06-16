@@ -102,6 +102,7 @@ input[type=text],input[type=number]{font-family:inherit;font-size:13px}
 .src-badge.src-workout{background:#dde9fb;color:#1f5fb0}
 .src-badge.src-name{background:#efe4fb;color:#7a3fb0}
 .src-badge.src-garmin{background:#d8eef0;color:#0f7d8c}
+.stitch-tag{font-size:10px;padding:1px 5px;border-radius:6px;background:#e7e0f7;color:#5b3fb0;white-space:nowrap}
 .src-badge.src-heuristic{background:#fdf0dc;color:#a9711a}
 .small{font-size:12px}
 .lap-type{padding:3px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px}
@@ -533,6 +534,7 @@ function structureBox(s){
       <input id="struct-input" class="target-input wide" placeholder="e.g. 5x5' or 5x4km p1'" value="${s.structure||''}"></label>
     <p class="muted small">Type the planned set to force detection (warm-up and cool-down are always excluded). Examples:
       <code>10x400m</code> · <code>5x5'</code> · <code>10x90"</code> · <code>5x4km p1'</code>.
+      Declaring the target also rejoins reps an autolap split mid-effort (e.g. a 1000 m + 200 m become one 1200 m rep, marked ⛓).
       Or fix any single lap with the Type dropdown in the table below.${title?` Garmin title: <i>${escapeHtml(String(title))}</i>.`:''}</p>
   </div>`;
 }
@@ -559,7 +561,8 @@ const LAP_TYPE_OPTS=[['active','Active'],['recovery','Recovery'],['wu','Warm-up'
 function lapTable(s){
   const rows=s.laps.map((l,i)=>{
     const cls=l.type==='active'?'active-row':l.type==='recovery'?'recovery-row':'wucd-row';
-    const label = l.type==='active'?('Rep '+l.rep):l.type==='recovery'?'recovery':l.type.toUpperCase();
+    const stitch = l.stitched_from?` <span class="stitch-tag" title="Rejoined ${l.stitched_from} autolap laps into one rep">⛓ ${l.stitched_from}</span>`:'';
+    const label = (l.type==='active'?('Rep '+l.rep):l.type==='recovery'?'recovery':l.type.toUpperCase())+stitch;
     const dist = l.distance_std?`${l.distance_std} m`:`${Math.round(l.distance_m)} m`;
     const sel=`<select class="lap-type" data-idx="${i}">`+LAP_TYPE_OPTS.map(([v,t])=>`<option value="${v}" ${l.type===v?'selected':''}>${t}</option>`).join('')+`</select>`;
     return `<tr class="${cls}"><td>${label}</td><td>${sel}</td><td>${dist}</td><td>${Math.round(l.duration_s)}s</td><td class="mono">${l.pace_fmt||'—'}</td><td>${num(l.hr_avg,0)}</td><td>${l.ea??'—'}</td><td>${l.cardiac_cost??'—'}</td><td>${l.hrr60??(l.rqs!=null?l.rqs+'%':'—')}</td><td>${l.delta_t??'—'}</td><td>${l.delta_i??'—'}</td><td>${l.lap_score??'—'}</td></tr>`;

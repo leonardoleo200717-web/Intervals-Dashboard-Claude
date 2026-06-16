@@ -629,14 +629,23 @@ def detect_intervals(laps, track, spec=None, lap_types=None):
          to the planned rep target;
       5. otherwise the legacy pace-ratio heuristic.
 
+    When a target is known (manual / workout / title), consecutive laps that an
+    autolap split mid-rep are first stitched back into one rep (see
+    _stitch_to_target) so e.g. a 1000 m autolap + a 200 m manual lap become one
+    1200 m rep. Stitching is deterministic, so per-lap overrides stay aligned.
+
     Returns (classified_laps, itype) where itype is 'distance' | 'time' | None.
-    classified_laps mirrors `laps` with an added 'type' (+ 'rep' for actives).
-    Easy runs never reach here.
+    classified_laps mirrors the (possibly stitched) laps with an added 'type'
+    (+ 'rep' for actives). Easy runs never reach here.
     """
-    n = len(laps)
     out = [dict(lp) for lp in laps]
     lap_types = {int(k): v for k, v in (lap_types or {}).items()
                  if str(v) in ("wu", "cd", "active", "recovery", "drill")}
+
+    # Target-driven lap stitching — rejoin autolap-split reps before classifying.
+    if spec and spec.get("rep_target"):
+        out = _stitch_to_target(out, spec)
+    n = len(out)
 
     manual_spec = bool(spec and spec.get("source") == "manual" and spec.get("rep_count"))
     if manual_spec:
@@ -725,6 +734,83 @@ def _classify_with_lap_intensity(out):
 
 def _lap_measure(lp, itype):
     return lp["duration_s"] if itype == "time" else lp["distance_m"]
+
+
+def _same_effort(a, b):
+    """True when two laps were run at a similar pace (≤25% apart).
+
+    Distinguishes the second half of one rep (same effort) from a recovery jog
+    (much slower). Pace is comparable for both distance- and time-based laps.
+    """
+    pa = pace_sec_km(a["distance_m"], a["duration_s"])
+    pb = pace_sec_km(b["distance_m"], b["duration_s"])
+    if pa is None or pb is None:
+        return False
+    return max(pa, pb) <= 1.25 * min(pa, pb)
+
+
+def _merge_laps(group):
+    """Fuse a run of laps into one. Distance/duration sum; HR is duration-
+    weighted; the trigger of the lap that ended the rep is kept."""
+    merged = dict(group[0])
+    merged["distance_m"] = sum(l["distance_m"] for l in group)
+    merged["duration_s"] = sum(l["duration_s"] for l in group)
+    hr_dur = [(l["hr_avg"], l["duration_s"]) for l in group if l.get("hr_avg")]
+    tot = sum(d for _, d in hr_dur)
+    merged["hr_avg"] = (sum(h * d for h, d in hr_dur) / tot) if tot else None
+    maxes = [l["max_hr"] for l in group if l.get("max_hr")]
+    merged["max_hr"] = max(maxes) if maxes else None
+    merged["lap_trigger"] = group[-1].get("lap_trigger")
+    merged["start_offset_s"] = group[0].get("start_offset_s", 0)
+    merged["stitched_from"] = len(group)   # surfaced in the UI as a hint
+    return merged
+
+
+def _stitch_to_target(laps, spec):
+    """Rejoin reps that an autolap split mid-effort, using the known target.
+
+    An autolap fires at a round distance/time (e.g. 1000 m) before you finish
+    the rep, so one 1200 m rep arrives as a 1000 m lap + a 200 m lap with no
+    recovery between. The signature is precise: an *anchor* lap that is most of
+    a rep but not all of it (60–95% of the target), optionally topped up by
+    smaller same-effort laps until the total reaches the target. This never
+    fires on drills (far below the anchor band) or on complete reps (≥95%), so
+    only genuine autolap splits are merged.
+    """
+    target = spec.get("rep_target")
+    itype = spec.get("itype")
+    if not target:
+        return laps
+    LOW, HIGH, TOL = 0.60, 0.95, 0.30
+    out = []
+    i, n = 0, len(laps)
+    while i < n:
+        m = _lap_measure(laps[i], itype)
+        if m and LOW * target <= m < HIGH * target:
+            group = [laps[i]]
+            total = m
+            j = i + 1
+            while j < n:
+                cand = laps[j]
+                cm = _lap_measure(cand, itype)
+                if not cm or cm >= m:                       # top-up must be smaller
+                    break
+                if not _same_effort(laps[i], cand):         # recovery / other → stop
+                    break
+                if total + cm > target * (1 + TOL):         # would overshoot
+                    break
+                group.append(cand)
+                total += cm
+                j += 1
+                if abs(total - target) <= target * TOL:     # reached the target
+                    break
+            if len(group) > 1 and abs(total - target) <= target * TOL:
+                out.append(_merge_laps(group))
+                i = j
+                continue
+        out.append(laps[i])
+        i += 1
+    return out
 
 
 def _classify_with_spec(out, spec):
@@ -1065,6 +1151,8 @@ def build_session_view(record, store):
               "duration_s": round(lp["duration_s"], 1),
               "hr_avg": int(lp["hr_avg"]) if lp.get("hr_avg") else None,
               "pace_fmt": fmt_pace(pace_sec_km(lp["distance_m"], lp["duration_s"]))}
+        if lp.get("stitched_from"):
+            lv["stitched_from"] = lp["stitched_from"]   # autolap-split rep rejoined
 
         if lp["type"] == "active":
             p = pace_sec_km(lp["distance_m"], lp["duration_s"])

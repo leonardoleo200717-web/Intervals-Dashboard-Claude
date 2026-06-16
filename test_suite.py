@@ -353,6 +353,60 @@ o19, _ = app.detect_intervals(ilaps, True, None, {"1": "drill"})
 check("C19 per-lap override beats intensity", o19[1]["type"] == "drill", o19[1]["type"])
 
 
+# --- target-driven lap stitching (autolap split mid-rep) ---------------
+# 5x1200m with autolap@1000m + manual press at 1200m: each rep is recorded as
+# a 1000m lap + a 200m lap (no recovery between). With the target known they
+# must be stitched back into one 1200m rep.
+def split_laps():
+    out = [lap(2000, 600, 130)]
+    for _ in range(5):
+        out += [lap(1000, 240, 175), lap(200, 48, 178), lap(400, 150, 140)]
+    out.append(lap(1500, 480, 125))
+    return out
+
+o20, it20 = app.detect_intervals(split_laps(), True, app.parse_structure_string("5x1200m"))
+a20 = [l for l in o20 if l["type"] == "active"]
+check("C20 autolap split → 5 reps", len(a20) == 5, len(a20))
+check("C20b reps are 1200m", all(abs(a["distance_m"] - 1200) < 1 for a in a20),
+      [int(a["distance_m"]) for a in a20])
+check("C20c rep duration summed (288s)", all(abs(a["duration_s"] - 288) < 1 for a in a20),
+      [a["duration_s"] for a in a20])
+check("C20d 200m surge not left as recovery",
+      not any(abs(l["distance_m"] - 200) < 1 for l in o20), [int(l["distance_m"]) for l in o20])
+check("C20e merged HR duration-weighted (~176)", all(174 <= a["hr_avg"] <= 178 for a in a20),
+      [round(a["hr_avg"]) for a in a20])
+
+# Without a target, stitching does NOT run (user chose target-driven only):
+o20n, _ = app.detect_intervals(split_laps(), True, None)
+check("C20f no target → not stitched", any(abs(l["distance_m"] - 200) < 1 for l in o20n))
+
+# Drills must NOT be stitched: 3×100m strides then 5×400m reps, target 400.
+drill_laps = [lap(2000, 600, 130), lap(100, 25, 150), lap(100, 24, 150), lap(100, 26, 150)] + \
+             sum([[lap(400, 90, 175), lap(200, 80, 140)] for _ in range(5)], []) + [lap(1500, 480, 125)]
+o21, _ = app.detect_intervals(drill_laps, True, app.parse_structure_string("5x400m"))
+a21 = [l for l in o21 if l["type"] == "active"]
+check("C21 drills not stitched → 5 reps of 400m",
+      len(a21) == 5 and all(abs(a["distance_m"] - 400) < 1 for a in a21),
+      [int(a["distance_m"]) for a in a21])
+
+# Complete single-lap reps (no split) are left untouched, not merged with rest.
+o22, _ = app.detect_intervals(interval_laps(5, 1200, 288), True, app.parse_structure_string("5x1200m"))
+a22 = [l for l in o22 if l["type"] == "active"]
+check("C22 complete reps untouched", len(a22) == 5 and all("stitched_from" not in l for l in o22),
+      len(a22))
+
+# Time-based autolap split: 5×3min recorded as 2:30 + 0:30 each.
+tsplit = [lap(2000, 600, 130)]
+for _ in range(5):
+    tsplit += [lap(625, 150, 175), lap(125, 30, 178), lap(400, 150, 140)]
+tsplit.append(lap(1500, 480, 125))
+o23, it23 = app.detect_intervals(tsplit, True, app.parse_structure_string("5x3min"))
+a23 = [l for l in o23 if l["type"] == "active"]
+check("C23 time-based split → 5 reps of 180s",
+      it23 == "time" and len(a23) == 5 and all(abs(a["duration_s"] - 180) < 1 for a in a23),
+      (it23, [a["duration_s"] for a in a23]))
+
+
 # ════════════════════════════════════════════════════════════════════
 # GROUP D — KPI engine
 # ════════════════════════════════════════════════════════════════════
