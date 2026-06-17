@@ -2,6 +2,7 @@
 .env
 .garmin_session/
 sessions.json
+settings.json
 fit_files/*.fit
 
 # Python

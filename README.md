@@ -94,6 +94,13 @@ L'architettura non lo preclude (container cron che esegue `garmin_sync.py` ogni 
 - **Recovery adherence:** se indichi il recupero pianificato nel titolo (es. `p1'` o `r400m`), la dashboard confronta i recuperi reali con quelli previsti.
 - **Compare:** scegli una sessione di riferimento; le sessioni con la stessa etichetta (o time-based entro ±1 min) vengono auto-selezionate. Grafici sovrapposti per ripetuta (ritmo, HR, EA, Lap Score) e tabella delta con frecce.
 - **Weekly:** totali Lun–Dom, volume giornaliero, TRIMP, ACWR, alert se l'aumento settimanale supera il +10%.
+- **Marathon — "Am I on track?":** scheda dedicata che proietta il tempo di maratona con un **ensemble di 4 modelli**, ricalcolato dal tuo allenamento ogni settimana, e lo confronta con l'obiettivo (default: Eindhoven 2:43, modificabile). Ogni modello è mostrato con il suo bias noto:
+  - **Riegel** (race-based, soffitto ottimistico) · **Daniels VDOT** (race-based, fisiologico) · **Tanda 2011** (training-based, il "pavimento di resistenza", mostrato a parte) · **Vickers–Vertosick 2016** (race + chilometraggio).
+  - La **stima centrale** è la media pesata dei modelli race-equivalent; lo **stato** è classificato Ahead / On track (±1%) / Behind con il delta sul goal, più una banda di incertezza ±3% e lo spread min–max.
+  - **Grafico per settimana:** Tanda (che si muove con volume e ritmo) + il centrale race-equivalent vs la linea del goal; sotto, "What changed" con il delta settimana-su-settimana di K (km), P (ritmo) e previsione.
+  - In **Goal & inputs** imposti obiettivo (nome/data/ritmo) e una gara di riferimento ben corsa di cui i modelli si fidano.
+
+> **Nota onesta sul modello Vickers–Vertosick (D):** i coefficienti pubblicati non sono stati verificabili da una fonte primaria in questo ambiente, quindi — come da brief — il modello è mostrato in stato *"coefficients not loaded"* invece di girare su numeri inventati. Per attivarlo, inserisci i coefficienti reali in `config.VICKERS_COEFFS` e completa `_vickers_marathon_time` in `app.py`.
 
 ## Chat AI (assistente di analisi)
 
