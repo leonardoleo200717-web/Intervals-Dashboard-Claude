@@ -111,3 +111,36 @@ DEFAULT_AI_PROVIDER = "anthropic"
 
 # Cap on the AI reply length (tokens), shared by every provider.
 AI_MAX_TOKENS = 500
+
+# ── Marathon "Am I on track?" predictor ───────────────────────────────
+# Goal pace/time come from USER_PROFILE.marathon_target_pace (232 s/km = 2:43).
+# These are editable defaults; the predictor settings store overrides them.
+MARATHON = {
+    "goal_name": "Eindhoven Marathon",
+    "goal_date": "2026-10-11",
+    # A trusted past race used as the race-equivalent anchor until a better one
+    # is entered. Leiden Marathon 2025-05 → 2:54:00.
+    "baseline_race": {"name": "Leiden Marathon 2025",
+                      "distance_m": 42195, "time_s": 2 * 3600 + 54 * 60,
+                      "date": "2025-05-25"},
+    "tanda_window_weeks": 8,        # weeks of training averaged for Tanda K & P
+    "uncertainty_band_pct": 3.0,    # ±% honesty band drawn around the central estimate
+    "on_track_tol_pct": 1.0,        # within ±% of goal = "On track"
+    # Ensemble weights over the *race-equivalent* models (renormalised across
+    # whichever are available). Tanda is shown separately as an endurance floor,
+    # not folded into the central estimate (it underestimates sub-2:47 targets).
+    "ensemble_weights": {"vdot": 0.45, "riegel": 0.25, "vickers": 0.30},
+    "bias_labels": {
+        "riegel": "Race-based · optimistic ceiling (often 10+ min fast for the marathon)",
+        "vdot": "Race-based · physiology (VO2max); mild optimism at sub-2:47 targets",
+        "tanda": "Training-based · endurance floor (underestimates sub-2:47) — shown separately",
+        "vickers": "Marathon-corrected · race + weekly mileage",
+    },
+}
+
+# Vickers & Vertosick (2016) regression coefficients for model D. Left as None
+# because the published coefficients could not be verified from a primary source
+# in this environment — per the integration brief, the model is shown in a
+# "coefficients not loaded" state rather than run on fabricated numbers. Drop the
+# real coefficients here (see _vickers_marathon_time in app.py) to enable it.
+VICKERS_COEFFS = None

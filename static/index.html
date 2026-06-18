@@ -48,6 +48,14 @@ h2{font-size:16px;margin:26px 0 12px}
 .kpi .value{font-size:26px;font-weight:700;margin-top:6px}
 .kpi .value.mono{font-size:24px}
 .kpi .foot{color:var(--muted);font-size:12px;margin-top:4px}
+.hero .hero-main{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.hero .big{font-size:40px;font-weight:700;line-height:1.1;margin-top:2px}
+.status-chip{padding:8px 18px;border-radius:999px;font-weight:700;font-size:16px}
+.status-chip.good{background:var(--teal-soft);color:var(--teal)}
+.status-chip.bad{background:#fae3e0;color:var(--red)}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.settings-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.settings-grid input{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;color:var(--ink)}
 .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
 .tag.track{background:var(--blue)} .tag.easy{background:var(--green)}
 .tag.dist{background:var(--purple)} .tag.time{background:var(--amber)}
@@ -142,6 +150,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
     <button class="nav-item" data-view="history">📋 History</button>
     <button class="nav-item" data-view="compare">🔬 Compare</button>
     <button class="nav-item" data-view="weekly">📅 Weekly</button>
+    <button class="nav-item" data-view="marathon">🎯 Marathon</button>
     <div class="spacer"></div>
     <button class="side-btn primary" id="btn-import">⬆ Import FIT</button>
     <button class="side-btn" id="btn-scan">🔄 Scan fit_files/</button>
@@ -224,6 +233,23 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
       <h2>Sessions this period</h2>
       <div class="card" id="weekly-sessions"></div>
     </section>
+
+    <!-- MARATHON -->
+    <section class="view" id="view-marathon">
+      <h1>Marathon — Am I on track?</h1>
+      <p class="sub">An ensemble of four models, recomputed from your training each week, vs your goal. Each model is shown with its known bias.</p>
+      <div id="marathon-status"></div>
+      <h2>Model breakdown</h2>
+      <div class="grid cards" id="marathon-models"></div>
+      <h2>Predicted finish per week</h2>
+      <div class="card"><div class="chart-wrap short"><canvas id="chart-marathon"></canvas></div>
+        <p class="muted" style="margin:10px 0 0">Tanda (training) moves with your weekly volume and pace — the endurance floor. The race-equivalent central updates when a faster race/effort appears. The flat line is your goal.</p>
+      </div>
+      <h2>What changed</h2>
+      <div class="card" id="marathon-changed"></div>
+      <h2>Goal &amp; inputs</h2>
+      <div class="card" id="marathon-settings"></div>
+    </section>
   </main>
 </div>
 
@@ -244,7 +270,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const charts={};
-let SESSIONS=[], WEEKLY=null, ALERTS=[], CONFIG={}, PREDICTIONS=null;
+let SESSIONS=[], WEEKLY=null, ALERTS=[], CONFIG={}, PREDICTIONS=null, MARATHON=null, MARATHON_SETTINGS=null;
 
 function destroyChart(k){ if(charts[k]){charts[k].destroy(); delete charts[k];} }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
@@ -257,7 +283,7 @@ function show(view){
   $('#view-'+view).classList.add('active');
   $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===view));
 }
-$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); });
+$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); if(n.dataset.view==='marathon') renderMarathon(); });
 
 // ── data load ───────────────────────────────────────────────────────
 // Single fetch helper: throws (and toasts) on any non-OK / non-JSON response
@@ -280,10 +306,12 @@ async function loadWeekly(){ WEEKLY=await fetchJSON('/api/weekly'); }
 async function loadAlerts(){ try{ ALERTS=(await fetchJSON('/api/alerts')).alerts||[]; }catch(e){ ALERTS=[]; } }
 async function loadConfig(){ try{ CONFIG=await fetchJSON('/api/config'); }catch(e){ CONFIG={}; } }
 async function loadPredictions(){ try{ PREDICTIONS=await fetchJSON('/api/predictions'); }catch(e){ PREDICTIONS=null; } }
+async function loadMarathon(){ try{ MARATHON=await fetchJSON('/api/marathon'); }catch(e){ MARATHON=null; } }
+async function loadMarathonSettings(){ try{ MARATHON_SETTINGS=await fetchJSON('/api/marathon/settings'); }catch(e){ MARATHON_SETTINGS=null; } }
 
 async function refreshAll(){
   try{
-    await Promise.all([loadSessions(), loadWeekly(), loadAlerts(), loadConfig(), loadPredictions()]);
+    await Promise.all([loadSessions(), loadWeekly(), loadAlerts(), loadConfig(), loadPredictions(), loadMarathon(), loadMarathonSettings()]);
   }catch(e){ /* individual loaders already toasted */ }
   renderHome();
 }
@@ -358,6 +386,118 @@ function renderPredictions(){
   </div>`;
 }
 function fmtClock(sec){ sec=Math.abs(Math.round(sec)); const m=Math.floor(sec/60),s=sec%60; return m+':'+String(s).padStart(2,'0'); }
+
+// ── MARATHON predictor ──────────────────────────────────────────────
+function renderMarathon(){
+  const m=MARATHON;
+  const statusBox=$('#marathon-status'), modelsBox=$('#marathon-models'), changedBox=$('#marathon-changed');
+  if(!m){ statusBox.innerHTML='<div class="card muted">No data yet — import some sessions to project your marathon.</div>';
+    modelsBox.innerHTML=''; changedBox.innerHTML=''; destroyChart('marathon'); renderMarathonSettings(); return; }
+
+  // status hero
+  const g=m.goal;
+  if(m.central&&m.status){
+    const st=m.status.state, d=m.status.delta_s;
+    const chip={ahead:['Ahead','good'],on_track:['On track','good'],behind:['Behind','bad']}[st];
+    const deltaTxt = d===0?'on goal':(d>0?`${fmtClock(d)} slower than goal`:`${fmtClock(-d)} faster than goal`);
+    const band=m.central.band;
+    statusBox.innerHTML=`<div class="card hero">
+      <div class="hero-main">
+        <div><div class="muted small">Predicted finish (central)</div>
+          <div class="big mono">${m.central.time_fmt}</div>
+          <div class="muted small">${m.central.pace_fmt}/km${band?` · band ${fmtDur(band.low_s)}–${fmtDur(band.high_s)}`:''}</div></div>
+        <div class="status-chip ${chip[1]}">${chip[0]}</div>
+      </div>
+      <div class="muted small" style="margin-top:8px">Goal: <b>${g.name}</b> ${g.date?`(${g.date})`:''} — ${g.time_fmt} @ ${g.pace_fmt}/km · <b class="${d>0?'bad':'good'}">${deltaTxt}</b>${m.spread?` · spread ${m.spread.min_fmt}–${m.spread.max_fmt}`:''}</div>
+      ${m.anchor?`<div class="muted small">Race-equivalent anchor: <b>${escapeHtml(String(m.anchor.name||'—'))}</b> — ${Math.round(m.anchor.distance_m)} m @ ${m.anchor.pace_fmt}/km${m.anchor.is_real_race?' (real race)':' (longest hard effort)'}.</div>`:''}
+    </div>`;
+  } else {
+    statusBox.innerHTML=`<div class="card"><b>Central estimate unavailable.</b> <span class="muted">${m.anchor?'':'Add a recent race in Goal &amp; inputs below, or import a session with a hard effort ≥ 1 km.'}</span>
+      <div class="muted small" style="margin-top:6px">Goal: ${g.name} — ${g.time_fmt} @ ${g.pace_fmt}/km.</div></div>`;
+  }
+
+  // model cards
+  modelsBox.innerHTML=m.models.map(md=>{
+    const floor=md.is_floor?' <span class="src-badge">floor</span>':'';
+    const val=md.available?`<div class="value mono">${md.time_fmt}</div>`
+      :`<div class="value muted" style="font-size:16px">— <span class="small">(${md.unavailable_reason})</span></div>`;
+    return `<div class="card kpi"><div class="label">${md.name}${floor}</div>${val}
+      <div class="foot">${md.bias}</div></div>`;
+  }).join('');
+
+  // what changed (latest week with a delta)
+  const weeks=(m.trend&&m.trend.weeks)||[];
+  const wc=[...weeks].reverse().find(w=>w.what_changed);
+  if(wc&&wc.what_changed){
+    const c=wc.what_changed;
+    changedBox.innerHTML=`<table class="predict-table"><tbody>
+      <tr><td>Weekly volume K</td><td class="mono">${wc.k_km??'—'} km</td><td class="mono">${c.k_km==null?'—':(c.k_km>0?'+':'')+c.k_km+' km'}</td></tr>
+      <tr><td>Training pace P</td><td class="mono">${wc.p_sec_km?fmtClock(wc.p_sec_km)+'/km':'—'}</td><td class="mono">${c.p_sec_km==null?'—':(c.p_sec_km>0?'+':'')+c.p_sec_km+' s/km'}</td></tr>
+      <tr><td>Tanda prediction</td><td class="mono">${wc.tanda_s?fmtDur(wc.tanda_s):'—'}</td><td class="mono">${c.tanda_s==null?'—':(c.tanda_s>0?'+':'')+fmtClock(c.tanda_s)}</td></tr>
+    </tbody></table><p class="muted small" style="margin:8px 0 0">Week-over-week change (latest vs prior training week).</p>`;
+  } else {
+    changedBox.innerHTML='<p class="muted">Not enough weeks yet to show week-over-week change.</p>';
+  }
+
+  renderMarathonChart();
+  renderMarathonSettings();
+}
+
+function fmtDur(sec){ if(sec==null) return '—'; sec=Math.round(sec); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`; }
+
+function renderMarathonChart(){
+  destroyChart('marathon');
+  const t=MARATHON&&MARATHON.trend; const weeks=(t&&t.weeks)||[];
+  const ctx=$('#chart-marathon');
+  if(!weeks.length){ ctx.parentElement.innerHTML='<p class="muted">No weekly data yet.</p>'; return; }
+  const toMin=s=>s==null?null:s/60;       // y axis in minutes for readable ticks
+  const goal=t.goal_s;
+  charts.marathon=new Chart(ctx,{type:'line',data:{labels:weeks.map(w=>w.label),
+    datasets:[
+      {label:'Tanda (training)',data:weeks.map(w=>toMin(w.tanda_s)),borderColor:'#1D9E75',tension:.3,pointRadius:3,spanGaps:true},
+      {label:'Race-equivalent central',data:weeks.map(w=>toMin(w.central_s)),borderColor:'#2f73c4',tension:.3,pointRadius:3,spanGaps:true},
+      {label:'Goal',data:weeks.map(()=>toMin(goal)),borderColor:'#d2483b',borderDash:[6,4],pointRadius:0},
+    ]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:true,position:'bottom'},
+      tooltip:{callbacks:{label:i=>`${i.dataset.label}: ${fmtDur(i.parsed.y*60)}`}}},
+      scales:{y:{title:{display:true,text:'finish time'},ticks:{callback:v=>fmtDur(v*60)}}}}});
+}
+
+function renderMarathonSettings(){
+  const s=MARATHON_SETTINGS||{};
+  const r=s.race||{};
+  $('#marathon-settings').innerHTML=`
+    <div class="settings-grid">
+      <label>Goal name<input id="ms-name" value="${escapeHtml(String(s.goal_name||''))}"></label>
+      <label>Goal date<input id="ms-date" type="date" value="${s.goal_date||''}"></label>
+      <label>Goal pace (m:ss /km)<input id="ms-pace" placeholder="3:52" value="${s.goal_pace_fmt||''}"></label>
+      <div class="muted small" style="align-self:end">= ${s.goal_time_fmt||'—'} marathon</div>
+    </div>
+    <p class="muted small" style="margin:14px 0 6px"><b>Reference race</b> (a recent well-paced race the race-based models trust). Leave as is to use your baseline.</p>
+    <div class="settings-grid">
+      <label>Race name<input id="ms-rname" value="${escapeHtml(String(r.name||''))}"></label>
+      <label>Distance (m)<input id="ms-rdist" type="number" value="${r.distance_m||''}"></label>
+      <label>Time (h:mm:ss)<input id="ms-rtime" placeholder="1:25:00" value="${r.time_s?fmtDur(r.time_s):''}"></label>
+      <label>Date<input id="ms-rdate" type="date" value="${r.date||''}"></label>
+    </div>
+    <button class="btn primary" id="ms-save" style="margin-top:12px">Save</button>`;
+  $('#ms-save').onclick=saveMarathonSettings;
+}
+
+async function saveMarathonSettings(){
+  const body={
+    goal_name:$('#ms-name').value, goal_date:$('#ms-date').value,
+    goal_pace_sec_km:$('#ms-pace').value,
+    race:{name:$('#ms-rname').value, distance_m:parseFloat($('#ms-rdist').value),
+          time_fmt:$('#ms-rtime').value, date:$('#ms-rdate').value},
+  };
+  try{
+    MARATHON_SETTINGS=await fetchJSON('/api/marathon/settings',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    await loadMarathon();
+    renderMarathon();
+    toast('Goal & inputs saved.');
+  }catch(e){ /* fetchJSON toasted */ }
+}
 
 function renderRefPaceChart(){
   destroyChart('refpace');

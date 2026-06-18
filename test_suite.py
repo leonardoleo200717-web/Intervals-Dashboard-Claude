@@ -18,6 +18,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # exercise the "AI not configured" pa
 
 import app
 app.STORE_PATH = os.path.join(_TMP, "sessions.json")
+app.SETTINGS_PATH = os.path.join(_TMP, "settings.json")
 app.FIT_DIR = os.path.join(_TMP, "fit_files")
 os.makedirs(app.FIT_DIR, exist_ok=True)
 
@@ -769,6 +770,89 @@ s1 = [lap(2000, 600, 130)] + sum([[lap(398 + i, 90, 175), lap(300, 110, 140)] fo
 o1c, _ = app.detect_intervals(s1, True, app.parse_structure_string("10x400m"))
 check("H32 near-distance recoveries excluded", sum(1 for l in o1c if l["type"] == "active") == 10,
       sum(1 for l in o1c if l["type"] == "active"))
+
+
+# ════════════════════════════════════════════════════════════════════
+# GROUP I — Marathon predictor (4-model ensemble)
+# ════════════════════════════════════════════════════════════════════
+section("I. Marathon predictor")
+
+# I1 VDOT of a 20:00 5K ≈ 49.8 (Daniels reference)
+vdot = app._vdot_value(5000, 20 * 60)
+check("I1 VDOT 5k=20:00 ≈ 49.8", abs(vdot - 49.8) < 0.5, vdot)
+
+# I2 VDOT marathon prediction for that VDOT ≈ 3:10–3:12
+mt = app._vdot_predict_time(vdot, app.MARATHON_M)
+check("I2 VDOT marathon ~3:11", 3 * 3600 + 8 * 60 < mt < 3 * 3600 + 14 * 60, app.fmt_duration(mt))
+
+# I3 VDOT inversion round-trips (predicted marathon has the same VDOT)
+check("I3 VDOT round-trips", abs(app._vdot_value(app.MARATHON_M, mt) - vdot) < 0.3,
+      app._vdot_value(app.MARATHON_M, mt))
+
+# I4 Riegel half→marathon uses the 1.06 exponent
+rr = app._riegel(80 * 60, 21097.5, app.MARATHON_M)
+check("I4 Riegel half(1:20)→marathon", abs(rr - 80 * 60 * 2 ** 1.06) < 1, app.fmt_duration(rr))
+
+# I5 Tanda formula exact
+pm = 17.1 + 140.0 * __import__("math").exp(-0.0053 * 90) + 0.55 * 270
+check("I5 Tanda K=90,P=270", abs(app._tanda_marathon_time(90, 270) - pm * 42.195) < 0.1)
+
+# I6 Vickers disabled while coefficients are not loaded
+check("I6 Vickers off by default", app._vickers_marathon_time(21097.5, 80 * 60, 90) is None)
+
+# I7 fmt_to_seconds parses h:mm:ss and m:ss
+check("I7 fmt_to_seconds 1:25:00", app.fmt_to_seconds("1:25:00") == 5100)
+check("I7b fmt_to_seconds 3:52", app.fmt_to_seconds("3:52") == 232)
+
+# Build a small multi-week store for the engine.
+import datetime as _dtm
+mstore = {}
+_mon = _dtm.date(2026, 4, 13)
+for _wk in range(8):
+    for _day, (_d, _t) in enumerate([(16000, 4240), (14000, 3700), (20000, 5300), (12000, 3180), (18000, 4770)]):
+        _iso = (_mon + _dtm.timedelta(weeks=_wk, days=_day)).isoformat()
+        mstore[f"{_iso}_{_day}"] = synth_record(f"{_iso}_{_day}", [lap(_d, _t, 150)],
+                                                easy=True, date_iso=_iso)
+
+ti = app._tanda_inputs(mstore)
+check("I8 tanda inputs computed", ti and ti["k_km"] > 0 and ti["p_sec_km"] > 0, ti)
+
+res = app.compute_marathon(mstore, {"race": {"name": "Half", "distance_m": 21097.5,
+                                             "time_s": 80 * 60, "date": "2026-05-30"}})
+check("I9 central computed", res["central"] and res["central"]["time_s"] > 0, res["central"])
+check("I10 status classified", res["status"] and res["status"]["state"] in ("ahead", "on_track", "behind"),
+      res["status"])
+ids = {m["id"]: m for m in res["models"]}
+check("I11 four models present", set(ids) == {"vdot", "riegel", "vickers", "tanda"}, list(ids))
+check("I12 vickers shown unavailable", ids["vickers"]["available"] is False
+      and "coefficients" in ids["vickers"]["unavailable_reason"])
+check("I13 tanda is the floor", ids["tanda"].get("is_floor") is True and ids["tanda"]["available"])
+check("I14 real race anchor preferred", res["anchor"]["is_real_race"] is True)
+check("I15 spread min<=max", res["spread"]["min_s"] <= res["spread"]["max_s"])
+check("I16 trend has 8 weeks", len(res["trend"]["weeks"]) == 8, len(res["trend"]["weeks"]))
+check("I17 trend tanda moves with training", any(w["tanda_s"] for w in res["trend"]["weeks"]))
+
+# I18 status flips with goal pace: a very soft goal → ahead/on_track
+soft = app.compute_marathon(mstore, {"race": {"name": "Half", "distance_m": 21097.5,
+                            "time_s": 80 * 60, "date": "2026-05-30"}, "goal_pace_sec_km": 260})
+check("I18 soft goal not 'behind'", soft["status"]["state"] in ("ahead", "on_track"), soft["status"])
+
+# I19 empty store → no crash, empty trend; central still comes from the config
+# baseline race (the always-available default anchor).
+empty = app.compute_marathon({}, {"race": None})
+check("I19 empty store safe", empty["trend"]["weeks"] == [] and empty["central"] is not None
+      and empty["anchor"]["is_real_race"] is True, (empty["trend"]["weeks"], empty["central"]))
+
+# I20-I22 API endpoints
+mar = c.get("/api/marathon")
+check("I20 /api/marathon 200", mar.status_code == 200 and "models" in mar.get_json())
+setg = c.get("/api/marathon/settings")
+check("I21 settings GET 200", setg.status_code == 200 and "goal_pace_fmt" in setg.get_json())
+patched = c.patch("/api/marathon/settings", json={"goal_pace_sec_km": "3:45",
+                  "race": {"name": "T", "distance_m": 10000, "time_fmt": "36:00", "date": "2026-06-01"}})
+pj = patched.get_json()
+check("I22 settings PATCH applies", patched.status_code == 200 and pj["goal_pace_sec_km"] == 225
+      and pj["race"]["distance_m"] == 10000, pj)
 
 
 # ── report ───────────────────────────────────────────────────────────

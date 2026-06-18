@@ -72,6 +72,7 @@ except Exception:  # pragma: no cover - only when dependency missing
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORE_PATH = os.path.join(BASE_DIR, "sessions.json")
+SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 FIT_DIR = os.path.join(BASE_DIR, "fit_files")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
@@ -110,15 +111,38 @@ def load_store():
 
 def save_store(store):
     """Atomic write: temp file in the same dir, then os.replace()."""
-    fd, tmp = tempfile.mkstemp(dir=BASE_DIR, prefix=".sessions_", suffix=".tmp")
+    _atomic_json_write(STORE_PATH, store, ".sessions_")
+
+
+def _atomic_json_write(path, data, prefix):
+    fd, tmp = tempfile.mkstemp(dir=BASE_DIR, prefix=prefix, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(store, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, STORE_PATH)
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+
+
+def load_settings():
+    """App-level settings (marathon goal, baseline race…). Falls back to the
+    config.py defaults for any key the user has not overridden."""
+    saved = {}
+    if os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+                saved = json.load(fh)
+            if not isinstance(saved, dict):
+                saved = {}
+        except (json.JSONDecodeError, OSError):
+            saved = {}
+    return saved
+
+
+def save_settings(settings):
+    _atomic_json_write(SETTINGS_PATH, settings, ".settings_")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -189,6 +213,26 @@ def fmt_duration(seconds):
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def fmt_to_seconds(text):
+    """Inverse of fmt_duration: 'h:mm:ss' or 'm:ss' (or plain seconds) → int s."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, (int, float)):
+        return int(text)
+    parts = str(text).strip().split(":")
+    try:
+        parts = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 1:
+        return parts[0]
+    return None
 
 
 def _get(msg, *names):
@@ -1769,6 +1813,81 @@ def api_predictions():
     return jsonify(compute_race_predictions(load_store()) or {})
 
 
+@app.route("/api/marathon")
+def api_marathon():
+    return jsonify(compute_marathon(load_store()))
+
+
+@app.route("/api/marathon/settings", methods=["GET", "PATCH"])
+def api_marathon_settings():
+    settings = load_settings()
+    if request.method == "PATCH":
+        body = request.get_json(silent=True) or {}
+        if "goal_name" in body:
+            settings["goal_name"] = (body["goal_name"] or "").strip() or None
+        if "goal_date" in body:
+            settings["goal_date"] = (body["goal_date"] or "").strip() or None
+        if "goal_pace_sec_km" in body:
+            gp = _parse_pace_to_sec(body["goal_pace_sec_km"])
+            settings["goal_pace_sec_km"] = gp
+        if "race" in body:
+            settings["race"] = _clean_race(body["race"])
+        settings = {k: v for k, v in settings.items() if v is not None}
+        save_settings(settings)
+    # Echo the effective settings (saved values over config defaults).
+    mc = config.MARATHON
+    eff = {
+        "goal_name": settings.get("goal_name") or mc["goal_name"],
+        "goal_date": settings.get("goal_date") or mc["goal_date"],
+        "goal_pace_sec_km": settings.get("goal_pace_sec_km")
+        or config.USER_PROFILE["marathon_target_pace"],
+        "race": settings.get("race") or mc["baseline_race"],
+    }
+    eff["goal_pace_fmt"] = fmt_pace(eff["goal_pace_sec_km"])
+    eff["goal_time_fmt"] = fmt_duration(eff["goal_pace_sec_km"] * 42.195)
+    return jsonify(eff)
+
+
+def _parse_pace_to_sec(value):
+    """Accept 'm:ss' (per-km pace) or a number of seconds; return int seconds."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value).strip()
+    if ":" in s:
+        try:
+            m, sec = s.split(":")
+            return int(m) * 60 + int(sec)
+        except ValueError:
+            return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def _clean_race(race):
+    """Validate a manually entered race {name, distance_m, time_s|time_fmt, date}."""
+    if not isinstance(race, dict):
+        return None
+    try:
+        dist = float(race.get("distance_m"))
+    except (TypeError, ValueError):
+        return None
+    time_s = race.get("time_s")
+    if time_s in (None, "") and race.get("time_fmt"):
+        time_s = fmt_to_seconds(race["time_fmt"])
+    try:
+        time_s = float(time_s)
+    except (TypeError, ValueError):
+        return None
+    if dist <= 0 or time_s <= 0:
+        return None
+    return {"name": (race.get("name") or "Race").strip(), "distance_m": dist,
+            "time_s": time_s, "date": (race.get("date") or "").strip() or None}
+
+
 @app.route("/api/sessions/<sid>/export.csv")
 def api_export_csv(sid):
     store = load_store()
@@ -2090,6 +2209,282 @@ def compute_race_predictions(store):
         "marathon_goal_pace_fmt": fmt_pace(goal_pace),
         "marathon_delta_s": round(pred_marathon - goal_time),
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# Marathon "Am I on track?" predictor — ensemble of 4 models
+# ════════════════════════════════════════════════════════════════════
+MARATHON_M = 42195.0
+
+
+def _vdot_value(distance_m, time_s):
+    """Daniels VDOT from a race (distance_m over time_s). Returns VO2-equivalent."""
+    if not distance_m or not time_s or time_s <= 0:
+        return None
+    t_min = time_s / 60.0
+    v = distance_m / t_min                      # m/min
+    vo2 = -4.60 + 0.182258 * v + 0.000104 * v * v
+    pct = (0.8 + 0.1894393 * math.exp(-0.012778 * t_min)
+           + 0.2989558 * math.exp(-0.1932605 * t_min))
+    if pct <= 0:
+        return None
+    return vo2 / pct
+
+
+def _vdot_predict_time(vdot, distance_m, lo=120.0, hi=360.0):
+    """Invert VDOT: binary-search the time (s) over distance_m matching vdot."""
+    if vdot is None:
+        return None
+    # _vdot_value is monotonically decreasing in time for a fixed distance.
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        v = _vdot_value(distance_m, mid * 60.0)
+        if v is None:
+            return None
+        if v > vdot:        # too fast (high VDOT) → need more time
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0 * 60.0
+
+
+def _tanda_marathon_time(k_km, p_sec_km):
+    """Tanda (2011): marathon pace Pm (s/km) from weekly km K and training pace P."""
+    if not k_km or not p_sec_km:
+        return None
+    pm = 17.1 + 140.0 * math.exp(-0.0053 * k_km) + 0.55 * p_sec_km
+    return pm * 42.195
+
+
+def _vickers_marathon_time(distance_m, time_s, weekly_km):
+    """Vickers & Vertosick (2016): race + weekly mileage → marathon time.
+
+    Disabled until the published coefficients are loaded (config.VICKERS_COEFFS).
+    The brief forbids fabricating them, so this returns None and the UI shows a
+    'coefficients not loaded' state rather than a guessed number.
+    """
+    if config.VICKERS_COEFFS is None:
+        return None
+    # Reference implementation goes here once real coefficients are supplied.
+    return None
+
+
+def _race_models(distance_m, time_s, weekly_km):
+    """All race-equivalent marathon predictions (seconds) keyed by model id."""
+    out = {}
+    out["riegel"] = _riegel(time_s, distance_m, MARATHON_M) if (distance_m and time_s) else None
+    out["vdot"] = _vdot_predict_time(_vdot_value(distance_m, time_s), MARATHON_M)
+    out["vickers"] = _vickers_marathon_time(distance_m, time_s, weekly_km)
+    return out
+
+
+def _tanda_inputs(store, as_of_week=None):
+    """Mean weekly km (K) and training pace (P, s/km) over the Tanda window.
+
+    Uses all runs (easy + interval). `as_of_week` (a Monday date) caps the
+    window for the weekly trend; default = the latest data week.
+    """
+    win = config.MARATHON["tanda_window_weeks"]
+    by_week = {}   # monday -> [dist_m, time_s]
+    for r in store.values():
+        v_iso = r.get("date_iso")
+        if not v_iso:
+            continue
+        wk = iso_week_start(v_iso)
+        d, t = r.get("total_distance_m") or 0.0, r.get("total_elapsed_s") or 0.0
+        agg = by_week.setdefault(wk, [0.0, 0.0])
+        agg[0] += d
+        agg[1] += t
+    if not by_week:
+        return None
+    end = as_of_week or max(by_week)
+    weeks = [end - timedelta(weeks=i) for i in range(win)]
+    dist = sum(by_week.get(w, [0.0, 0.0])[0] for w in weeks)
+    time = sum(by_week.get(w, [0.0, 0.0])[1] for w in weeks)
+    present = sum(1 for w in weeks if w in by_week)
+    if present == 0 or dist <= 0:
+        return None
+    k_km = (dist / 1000.0) / win
+    p_sec_km = time / (dist / 1000.0)
+    return {"k_km": round(k_km, 1), "p_sec_km": round(p_sec_km, 1),
+            "weeks_used": present, "partial": present < win}
+
+
+def _race_anchor(store, settings, as_of_iso=None):
+    """The race-equivalent effort the race-based models extrapolate from.
+
+    Priority: a user-entered race (settings) → the config baseline race → the
+    longest hard continuous-ish effort in the data (the longest active rep).
+    `as_of_iso` caps candidates to on/before that date (for the weekly trend).
+    """
+    def ok_date(d):
+        return (not as_of_iso) or (d and d <= as_of_iso)
+
+    race = settings.get("race") or config.MARATHON["baseline_race"]
+    if race and race.get("distance_m") and race.get("time_s") and ok_date(race.get("date")):
+        return {"distance_m": float(race["distance_m"]), "time_s": float(race["time_s"]),
+                "date": race.get("date"), "name": race.get("name", "Race"),
+                "source": "race", "is_real_race": True}
+
+    best = None
+    for r in store.values():
+        if r.get("easy") or not ok_date(r.get("date_iso")):
+            continue
+        view = build_session_view(r, store)
+        for lp in view["laps"]:
+            if lp["type"] != "active":
+                continue
+            d, t = lp.get("distance_m"), lp.get("duration_s")
+            if d and t and d >= 1000 and t > 0:
+                cand = {"distance_m": d, "time_s": t, "date": view["date_iso"],
+                        "name": view["label"], "source": "effort", "is_real_race": False}
+                if best is None or d > best["distance_m"]:
+                    best = cand
+    return best
+
+
+def compute_marathon(store, settings=None):
+    """Assemble the 4-model ensemble, on-track status and weekly trend."""
+    settings = settings or load_settings()
+    mc = config.MARATHON
+    goal_pace = settings.get("goal_pace_sec_km") or config.USER_PROFILE["marathon_target_pace"]
+    goal_time = goal_pace * 42.195
+    goal_date = settings.get("goal_date") or mc["goal_date"]
+    goal_name = settings.get("goal_name") or mc["goal_name"]
+
+    tanda = _tanda_inputs(store)
+    anchor = _race_anchor(store, settings)
+    weekly_km = tanda["k_km"] if tanda else None
+
+    models = []   # one entry per model (race + tanda), with availability + bias
+    race_preds = {}
+    if anchor:
+        rm = _race_models(anchor["distance_m"], anchor["time_s"], weekly_km)
+        for mid in ("vdot", "riegel", "vickers"):
+            t = rm.get(mid)
+            race_preds[mid] = t
+            models.append({
+                "id": mid, "name": {"vdot": "Daniels VDOT", "riegel": "Riegel",
+                                    "vickers": "Vickers–Vertosick"}[mid],
+                "time_s": round(t) if t else None,
+                "time_fmt": fmt_duration(t) if t else None,
+                "available": t is not None,
+                "unavailable_reason": (None if t else
+                                       ("coefficients not loaded" if mid == "vickers"
+                                        else "needs a recent race")),
+                "bias": mc["bias_labels"][mid],
+            })
+    else:
+        for mid in ("vdot", "riegel", "vickers"):
+            models.append({"id": mid, "name": {"vdot": "Daniels VDOT", "riegel": "Riegel",
+                           "vickers": "Vickers–Vertosick"}[mid], "time_s": None,
+                           "time_fmt": None, "available": False,
+                           "unavailable_reason": "needs a recent race",
+                           "bias": mc["bias_labels"][mid]})
+
+    tanda_time = _tanda_marathon_time(tanda["k_km"], tanda["p_sec_km"]) if tanda else None
+    models.append({
+        "id": "tanda", "name": "Tanda (training)",
+        "time_s": round(tanda_time) if tanda_time else None,
+        "time_fmt": fmt_duration(tanda_time) if tanda_time else None,
+        "available": tanda_time is not None,
+        "unavailable_reason": None if tanda_time else "needs training data",
+        "bias": mc["bias_labels"]["tanda"],
+        "is_floor": True,
+        "inputs": tanda,
+    })
+
+    # Central estimate = weighted mean over available race-equivalent models.
+    weights = mc["ensemble_weights"]
+    avail = {mid: t for mid, t in race_preds.items() if t}
+    central = None
+    if avail:
+        wsum = sum(weights.get(mid, 0) for mid in avail)
+        if wsum > 0:
+            central = sum(t * weights.get(mid, 0) for mid, t in avail.items()) / wsum
+
+    # Honest spread: min/max across every available model (race + Tanda floor).
+    all_times = [m["time_s"] for m in models if m["time_s"]]
+    spread = {"min_s": min(all_times), "max_s": max(all_times)} if all_times else None
+    band = mc["uncertainty_band_pct"] / 100.0
+    band_s = {"low_s": round(central * (1 - band)), "high_s": round(central * (1 + band))} \
+        if central else None
+
+    # Status vs goal.
+    status = None
+    if central:
+        delta = central - goal_time
+        tol = mc["on_track_tol_pct"] / 100.0 * goal_time
+        status = {"delta_s": round(delta),
+                  "state": "ahead" if delta < -tol else "behind" if delta > tol else "on_track"}
+
+    return {
+        "goal": {"name": goal_name, "date": goal_date,
+                 "time_fmt": fmt_duration(goal_time), "time_s": round(goal_time),
+                 "pace_fmt": fmt_pace(goal_pace), "pace_sec_km": goal_pace},
+        "anchor": (None if not anchor else {
+            "distance_m": round(anchor["distance_m"]), "time_s": round(anchor["time_s"]),
+            "pace_fmt": fmt_pace(anchor["time_s"] / (anchor["distance_m"] / 1000.0)),
+            "date": anchor.get("date"), "name": anchor.get("name"),
+            "is_real_race": anchor.get("is_real_race", False)}),
+        "models": models,
+        "central": (None if not central else {
+            "time_s": round(central), "time_fmt": fmt_duration(central),
+            "pace_fmt": fmt_pace(central / 42.195), "band": band_s}),
+        "spread": (None if not spread else {
+            "min_fmt": fmt_duration(spread["min_s"]), "max_fmt": fmt_duration(spread["max_s"]),
+            "min_s": spread["min_s"], "max_s": spread["max_s"]}),
+        "status": status,
+        "trend": _marathon_trend(store, settings, goal_time),
+    }
+
+
+def _marathon_trend(store, settings, goal_time, n_weeks=8):
+    """Per-week Tanda (the weekly engine) and race-equivalent central, vs goal.
+
+    Tanda moves with training each week; the race-equivalent central updates when
+    a better race/effort becomes available. 'what_changed' is the WoW delta.
+    """
+    isos = [r.get("date_iso") for r in store.values() if r.get("date_iso")]
+    if not isos:
+        return {"weeks": []}
+    last = iso_week_start(max(isos))
+    weeks_range = [last - timedelta(weeks=i) for i in range(n_weeks - 1, -1, -1)]
+
+    out = []
+    prev = None
+    for wk in weeks_range:
+        ti = _tanda_inputs(store, as_of_week=wk)
+        tanda_t = _tanda_marathon_time(ti["k_km"], ti["p_sec_km"]) if ti else None
+        anchor = _race_anchor(store, settings, as_of_iso=(wk + timedelta(days=6)).isoformat())
+        central_t = None
+        if anchor:
+            rm = _race_models(anchor["distance_m"], anchor["time_s"], ti["k_km"] if ti else None)
+            weights = config.MARATHON["ensemble_weights"]
+            avail = {m: t for m, t in rm.items() if t}
+            wsum = sum(weights.get(m, 0) for m in avail)
+            if wsum > 0:
+                central_t = sum(t * weights.get(m, 0) for m, t in avail.items()) / wsum
+        row = {
+            "week_start": wk.isoformat(),
+            "label": f"{wk.day} {MONTHS[wk.month - 1]}",
+            "tanda_s": round(tanda_t) if tanda_t else None,
+            "central_s": round(central_t) if central_t else None,
+            "k_km": ti["k_km"] if ti else None,
+            "p_sec_km": ti["p_sec_km"] if ti else None,
+        }
+        if prev:
+            row["what_changed"] = {
+                "k_km": (round(row["k_km"] - prev["k_km"], 1)
+                         if row["k_km"] is not None and prev["k_km"] is not None else None),
+                "p_sec_km": (round(row["p_sec_km"] - prev["p_sec_km"], 1)
+                             if row["p_sec_km"] is not None and prev["p_sec_km"] is not None else None),
+                "tanda_s": (row["tanda_s"] - prev["tanda_s"]
+                            if row["tanda_s"] and prev["tanda_s"] else None),
+            }
+        out.append(row)
+        prev = row
+    return {"weeks": out, "goal_s": round(goal_time)}
 
 
 def public_config():
