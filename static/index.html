@@ -367,23 +367,33 @@ function renderHome(){
 
 function renderPredictions(){
   const box=$('#home-predict');
-  const p=PREDICTIONS;
-  if(!p||!p.predictions||!p.predictions.length){
+  const p=PREDICTIONS, M=MARATHON;
+  if((!p||!p.predictions||!p.predictions.length) && !(M&&M.central)){
     box.innerHTML='<div class="card muted">No race prediction yet — needs at least one hard rep of ≥ 1 km.</div>';
     return;
   }
-  const confLabel={high:'high confidence',medium:'medium confidence',low:'low confidence — short anchor'}[p.confidence]||p.confidence;
-  const dm=p.marathon_delta_s;
-  const deltaTxt = dm===0?'on goal'
-    : (dm>0?`${fmtClock(dm)} slower than goal`:`${fmtClock(-dm)} faster than goal`);
-  const deltaCls = dm>0?'bad':'good';
-  const rows=p.predictions.map(r=>`<tr><td>${r.name}</td><td class="mono">${r.time_fmt}</td><td class="mono">${r.pace_fmt}/km</td></tr>`).join('');
-  box.innerHTML=`<div class="card">
-    <p class="muted small" style="margin:0 0 8px">Riegel projection from your best long effort:
-      <b>${p.anchor.label}</b> — ${Math.round(p.anchor.distance_m)} m @ ${p.anchor.pace_fmt}/km (${p.anchor.date}). <i>${confLabel}.</i></p>
-    <table class="predict-table"><thead><tr><th>Distance</th><th>Predicted</th><th>Pace</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="small" style="margin:10px 0 0">Marathon goal ${p.marathon_goal_fmt} (${p.marathon_goal_pace_fmt}/km) — predicted <b class="${deltaCls}">${deltaTxt}</b>.</p>
-  </div>`;
+  // 5K–Half: Riegel from the best long effort. Marathon: the same 4-model
+  // ensemble shown on the Marathon tab, so the marathon number matches there.
+  let rows='', anchorTxt='';
+  if(p&&p.predictions&&p.predictions.length){
+    const confLabel={high:'high confidence',medium:'medium confidence',low:'low confidence — short anchor'}[p.confidence]||p.confidence;
+    rows=p.predictions.filter(r=>r.name!=='Marathon')
+      .map(r=>`<tr><td>${r.name}</td><td class="mono">${r.time_fmt}</td><td class="mono">${r.pace_fmt}/km</td></tr>`).join('');
+    anchorTxt=`<p class="muted small" style="margin:0 0 8px">5K–Half via Riegel from your best long effort:
+      <b>${p.anchor.label}</b> — ${Math.round(p.anchor.distance_m)} m @ ${p.anchor.pace_fmt}/km (${p.anchor.date}). <i>${confLabel}.</i></p>`;
+  }
+  let marRow='', marNote='';
+  if(M&&M.central){
+    marRow=`<tr><td>Marathon <span class="muted small">(ensemble)</span></td><td class="mono">${M.central.time_fmt}</td><td class="mono">${M.central.pace_fmt}/km</td></tr>`;
+    if(M.status){
+      const dm=M.status.delta_s;
+      const deltaTxt = dm===0?'on goal':(dm>0?`${fmtClock(dm)} slower than goal`:`${fmtClock(-dm)} faster than goal`);
+      marNote=`<p class="small" style="margin:10px 0 0">Marathon goal ${M.goal.time_fmt} (${M.goal.pace_fmt}/km) — predicted <b class="${dm>0?'bad':'good'}">${deltaTxt}</b>. <span class="muted">Full 4-model breakdown in the Marathon tab.</span></p>`;
+    }
+  }
+  box.innerHTML=`<div class="card">${anchorTxt}
+    <table class="predict-table"><thead><tr><th>Distance</th><th>Predicted</th><th>Pace</th></tr></thead><tbody>${rows}${marRow}</tbody></table>
+    ${marNote}</div>`;
 }
 function fmtClock(sec){ sec=Math.abs(Math.round(sec)); const m=Math.floor(sec/60),s=sec%60; return m+':'+String(s).padStart(2,'0'); }
 
@@ -783,30 +793,53 @@ function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>
 
 // ── COMPARE ─────────────────────────────────────────────────────────
 const CMP_COLORS=['#1D9E75','#2f73c4','#7a52c4','#e0972a'];
+function repList(s){ return (s.laps||[]).filter(l=>l.type==='active'); }
+function repCount(s){ return repList(s).length; }
+function medianRep(s){
+  const vals=repList(s).map(l=> s.itype==='time'? l.duration_s : l.distance_m).filter(v=>v).sort((a,b)=>a-b);
+  return vals.length?vals[Math.floor(vals.length/2)]:null;
+}
+// Similar — not identical. Interval sessions match other interval sessions of
+// the same kind (time vs distance), ranked by how close their rep size and rep
+// count are; so 3×10' sits next to 4×8' or 5×2', and mixed sessions still match.
+// A continuous run (no reps) matches other runs by total distance.
 function compareCandidates(ref){
+  const refHasReps=repCount(ref)>0;
+  const refMed=medianRep(ref), refN=repCount(ref);
+  const sim=s=>{
+    if(refHasReps){
+      const md=medianRep(s)||0, n=repCount(s);
+      return (refMed?Math.abs(md-refMed)/refMed:0)+(refN?Math.abs(n-refN)/refN:0);
+    }
+    return Math.abs((s.km||0)-(ref.km||0));
+  };
   return SESSIONS.filter(s=>{
     if(s.id===ref.id||s.easy) return false;
-    if(s.itype==='time'&&ref.itype==='time'){
-      return Math.abs((s.duration_s||0)-(ref.duration_s||0))<=60 || s.label===ref.label;
+    if(refHasReps){
+      if(repCount(s)===0) return false;                          // need reps to overlay
+      if(s.itype&&ref.itype&&s.itype!==ref.itype) return false;  // keep time vs distance apart
+      return true;
     }
-    return s.label===ref.label;
-  });
+    return repCount(s)===0;   // continuous run ↔ continuous run
+  }).sort((a,b)=>sim(a)-sim(b));
 }
 function renderCompareSetup(){
-  const intervals=SESSIONS.filter(s=>!s.easy);
+  const eligible=SESSIONS.filter(s=>!s.easy);
   const sel=$('#compare-ref');
-  if(!intervals.length){ $('#compare-candidates').innerHTML='<div class="empty">Need at least one interval session to compare.</div>'; $('#compare-output').innerHTML=''; sel.innerHTML=''; return; }
-  sel.innerHTML=intervals.map(s=>`<option value="${s.id}">${s.date} — ${s.label}</option>`).join('');
+  if(!eligible.length){ $('#compare-candidates').innerHTML='<div class="empty">Need at least one non-easy session to compare.</div>'; $('#compare-output').innerHTML=''; sel.innerHTML=''; return; }
+  sel.innerHTML=eligible.map(s=>`<option value="${s.id}">${s.date} — ${s.label}${repCount(s)?` (${repCount(s)} reps)`:''}</option>`).join('');
   sel.onchange=renderCompareCandidates;
   renderCompareCandidates();
 }
 function renderCompareCandidates(){
   const ref=SESSIONS.find(s=>s.id===$('#compare-ref').value);
   const cands=compareCandidates(ref);
-  if(!cands.length){ $('#compare-candidates').innerHTML='<p class="muted">No other sessions match this label.</p>'; $('#compare-output').innerHTML=''; return; }
-  // auto-select up to 3 most recent
-  $('#compare-candidates').innerHTML='<b>Compare against</b> (up to 3):<div class="flagrow">'+
-    cands.map((s,i)=>`<label><input type="checkbox" class="cmp-pick" value="${s.id}" ${i<3?'checked':''}> ${s.date} — ${s.label}</label>`).join('')+'</div>';
+  const hint = repCount(ref)
+    ? 'Similar interval sessions (same kind, closest size first) — not just identical labels.'
+    : 'This is a continuous run (no reps): comparing session-level metrics with similar runs.';
+  if(!cands.length){ $('#compare-candidates').innerHTML=`<p class="muted">No comparable sessions found. ${hint}</p>`; $('#compare-output').innerHTML=''; return; }
+  $('#compare-candidates').innerHTML=`<b>Compare against</b> (up to 3): <span class="muted small">${hint}</span><div class="flagrow">`+
+    cands.map((s,i)=>`<label><input type="checkbox" class="cmp-pick" value="${s.id}" ${i<3?'checked':''}> ${s.date} — ${s.label}${repCount(s)?` (${repCount(s)} reps)`:''}</label>`).join('')+'</div>';
   $$('.cmp-pick').forEach(cb=>cb.onchange=enforceCmpLimit);
   renderCompareCharts();
 }
@@ -819,13 +852,14 @@ function renderCompareCharts(){
   const ref=SESSIONS.find(s=>s.id===$('#compare-ref').value);
   const picks=$$('.cmp-pick:checked').map(cb=>SESSIONS.find(s=>s.id===cb.value));
   const all=[ref,...picks];
-  const series=all.map((s,i)=>({s, color:CMP_COLORS[i%CMP_COLORS.length], reps:s.laps.filter(l=>l.type==='active')}));
+  const series=all.map((s,i)=>({s, color:CMP_COLORS[i%CMP_COLORS.length], reps:repList(s)}));
+  const anyReps=series.some(x=>x.reps.length>0);
   const maxReps=Math.max(...series.map(x=>x.reps.length),0);
   const labels=Array.from({length:maxReps},(_,i)=>'R'+(i+1));
   const metric=(reps,fn)=>reps.map(fn);
   const paceSec=l=>{ if(!l.pace_fmt||l.pace_fmt==='—')return null; const[m,sec]=l.pace_fmt.split(':').map(Number); return m*60+sec; };
 
-  $('#compare-output').innerHTML=`
+  const chartsHtml = anyReps ? `
     <div class="row">
       <div><h2>Pace per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-pace"></canvas></div></div></div>
       <div><h2>HR per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-hr"></canvas></div></div></div>
@@ -833,10 +867,14 @@ function renderCompareCharts(){
     <div class="row">
       <div><h2>EA per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-ea"></canvas></div></div></div>
       <div><h2>Lap Score per rep</h2><div class="card"><div class="chart-wrap short"><canvas id="cmp-score"></canvas></div></div></div>
-    </div>
+    </div>`
+    : `<div class="card muted">No per-rep charts: none of the selected sessions has detected reps (they look like continuous runs). The session-level comparison is below — declare a structure on a session (Override box) to get rep-by-rep charts.</div>`;
+
+  $('#compare-output').innerHTML=`${chartsHtml}
     <h2>Delta table</h2>
     <div class="card" style="overflow-x:auto">${cmpDeltaTable(all,ref)}</div>`;
 
+  if(!anyReps) return;
   const ds=(fn,fmt)=>series.map(x=>({label:x.s.date,data:metric(x.reps,fn),borderColor:x.color,backgroundColor:x.color,tension:.3,pointRadius:3,spanGaps:true}));
   const opt=(yTitle,invertNote)=>({maintainAspectRatio:false,plugins:{legend:{display:true,position:'bottom',labels:{boxWidth:12}}},scales:{y:{title:{display:true,text:yTitle}}}});
   cmpMakeChart('cmp-pace',labels,ds(paceSec),opt('sec/km'),true);

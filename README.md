@@ -93,7 +93,7 @@ Sintesi della settimana corrente e dei trend di lungo periodo:
 Lista di tutte le sessioni (più recenti in alto), filtrabile per tipo (interval/easy/track) e tipo di ripetuta (distance/time). Clic su una riga → dettaglio.
 
 ### 🔬 Compare
-Scegli una sessione di riferimento; quelle con la stessa etichetta (o time-based entro ±1 min) vengono auto-selezionate. Grafici sovrapposti ripetuta-per-ripetuta (ritmo, HR, EA, Lap Score) e tabella delta con frecce.
+Scegli una sessione di riferimento; vengono proposte le sessioni **simili — non identiche** (stesso tipo, time vs distance, ordinate per vicinanza di dimensione e numero ripetute), così `3×10'` si confronta con `4×8'` o `5×2'` e anche le sessioni miste trovano corrispondenze. Grafici sovrapposti ripetuta-per-ripetuta (ritmo, HR, EA, Lap Score) allineati per indice (R1, R2…) e tabella delta con frecce. Se confronti corse continue (senza ripetute), i grafici per-rep vengono nascosti e resta il confronto a livello di sessione; per avere i grafici per-rep dichiara la struttura nella casella Override.
 
 ### 📅 Weekly
 Report settimanale Lun–Dom: card WK-01…WK-10, grafico volume giornaliero (interval vs easy), volume rolling 4 settimane, lista sessioni del periodo e banner di alert quando l'aumento settimanale supera il +10%.
