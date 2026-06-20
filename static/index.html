@@ -56,6 +56,9 @@ h2{font-size:16px;margin:26px 0 12px}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
 .settings-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .settings-grid input{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;color:var(--ink)}
+.suggestions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.suggestions .sugg{cursor:pointer;border:1px solid var(--line)}
+.suggestions .sugg:hover{background:var(--teal-soft);color:var(--teal)}
 .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
 .tag.track{background:var(--blue)} .tag.easy{background:var(--green)}
 .tag.dist{background:var(--purple)} .tag.time{background:var(--amber)}
@@ -151,6 +154,7 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
     <button class="nav-item" data-view="compare">🔬 Compare</button>
     <button class="nav-item" data-view="weekly">📅 Weekly</button>
     <button class="nav-item" data-view="marathon">🎯 Marathon</button>
+    <button class="nav-item" data-view="coach">💬 AI Coach</button>
     <div class="spacer"></div>
     <button class="side-btn primary" id="btn-import">⬆ Import FIT</button>
     <button class="side-btn" id="btn-scan">🔄 Scan fit_files/</button>
@@ -250,6 +254,13 @@ select{font-family:inherit;padding:6px 10px;border:1px solid var(--line);border-
       <h2>Goal &amp; inputs</h2>
       <div class="card" id="marathon-settings"></div>
     </section>
+
+    <!-- AI COACH -->
+    <section class="view" id="view-coach">
+      <h1>AI Coach</h1>
+      <p class="sub">Ask about your training across all sessions — progress, load, pacing for your goal. Needs an AI provider key (see the chat in a session for setup).</p>
+      <div id="coach-body"></div>
+    </section>
   </main>
 </div>
 
@@ -283,7 +294,7 @@ function show(view){
   $('#view-'+view).classList.add('active');
   $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===view));
 }
-$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); if(n.dataset.view==='marathon') renderMarathon(); });
+$$('.nav-item').forEach(n=>n.onclick=()=>{ show(n.dataset.view); if(n.dataset.view==='weekly') renderWeekly(); if(n.dataset.view==='history') renderHistory(); if(n.dataset.view==='home') renderHome(); if(n.dataset.view==='compare') renderCompareSetup(); if(n.dataset.view==='marathon') renderMarathon(); if(n.dataset.view==='coach') renderCoach(); });
 
 // ── data load ───────────────────────────────────────────────────────
 // Single fetch helper: throws (and toasts) on any non-OK / non-JSON response
@@ -739,7 +750,7 @@ function renderLapScoreChart(s){
 }
 
 // ── chat (SSE streaming) ────────────────────────────────────────────
-function chatModelSelector(){
+function chatModelSelector(id='chat-model'){
   const provs=CONFIG.ai_providers||[];
   if(!provs.length){
     return `<span class="muted">No AI provider configured — add a key (e.g. ANTHROPIC_API_KEY) to .env.</span>`;
@@ -752,24 +763,24 @@ function chatModelSelector(){
     }).join('');
     return `<optgroup label="${escapeHtml(p.label)}">${opts}</optgroup>`;
   }).join('');
-  return `<label>Model <select id="chat-model">${groups}</select></label>`;
+  return `<label>Model <select id="${id}">${groups}</select></label>`;
 }
-function chatChoice(){
-  const sel=$('#chat-model');
+function chatChoice(id='chat-model'){
+  const sel=$('#'+id);
   if(!sel||!sel.value) return {};
   const [provider,model]=sel.value.split('|');
   return {provider,model};
 }
-async function sendChat(){
-  const inp=$('#chat-text'); const text=inp.value.trim(); if(!text) return;
-  const log=$('#chat-log');
-  log.innerHTML+=`<div class="msg user">${escapeHtml(text)}</div>`;
-  inp.value=''; log.scrollTop=log.scrollHeight;
-  const bot=document.createElement('div'); bot.className='msg bot'; bot.textContent='…'; log.appendChild(bot); log.scrollTop=log.scrollHeight;
+// Shared SSE streamer for both the per-session chat and the cross-session coach.
+async function streamChat(logEl, inputEl, history, extraBody, modelId){
+  const text=inputEl.value.trim(); if(!text) return;
+  logEl.innerHTML+=`<div class="msg user">${escapeHtml(text)}</div>`;
+  inputEl.value=''; logEl.scrollTop=logEl.scrollHeight;
+  const bot=document.createElement('div'); bot.className='msg bot'; bot.textContent='…'; logEl.appendChild(bot); logEl.scrollTop=logEl.scrollHeight;
   let reply='';
   try{
     const r=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session_id:CURRENT.id,message:text,history:CHAT_HISTORY,...chatChoice()})});
+      body:JSON.stringify({message:text,history,...extraBody,...chatChoice(modelId)})});
     if(!r.ok){ const data=await r.json().catch(()=>({})); bot.className='msg err'; bot.textContent=data.error||'AI request failed'; return; }
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
@@ -781,14 +792,36 @@ async function sendChat(){
         if(!line.startsWith('data:')) continue;
         const evt=JSON.parse(line.slice(5).trim());
         if(evt.error){ bot.className='msg err'; bot.textContent=evt.error; return; }
-        if(evt.delta){ reply+=evt.delta; bot.textContent=reply; log.scrollTop=log.scrollHeight; }
+        if(evt.delta){ reply+=evt.delta; bot.textContent=reply; logEl.scrollTop=logEl.scrollHeight; }
       }
     }
     if(!reply){ bot.textContent='(no response)'; return; }
-    CHAT_HISTORY.push({role:'user',content:text},{role:'assistant',content:reply});
+    history.push({role:'user',content:text},{role:'assistant',content:reply});
   }catch(err){ bot.className='msg err'; bot.textContent='Network error.'; }
-  log.scrollTop=log.scrollHeight;
+  logEl.scrollTop=logEl.scrollHeight;
 }
+function sendChat(){ return streamChat($('#chat-log'),$('#chat-text'),CHAT_HISTORY,{session_id:CURRENT.id},'chat-model'); }
+
+// ── AI Coach (cross-session) ────────────────────────────────────────
+let COACH_HISTORY=[];
+const COACH_PROMPTS=['Am I improving?','How is my training load and injury risk?','Am I on pace for my marathon goal?','How is my aerobic fitness trending?'];
+function renderCoach(){
+  const hasData=SESSIONS.length>0;
+  $('#coach-body').innerHTML=`
+    <div class="chat" style="height:460px">
+      <div class="chat-bar">${chatModelSelector('coach-model')}</div>
+      <div class="chat-log" id="coach-log"><div class="msg bot">Ask me about your trends across sessions — progress, load, and whether you're on track for your goal.</div></div>
+      <div class="disclosure">Your training summary (weekly totals, EF & HR-at-pace trends, recent sessions, marathon projection) is sent to the selected AI provider.</div>
+      <div class="chat-input"><input id="coach-text" placeholder="e.g. Am I improving over the last 8 weeks?"><button class="btn primary" id="coach-send">Send</button><button class="btn" id="coach-clear">Clear</button></div>
+    </div>
+    <div class="suggestions">${COACH_PROMPTS.map(q=>`<button class="pill sugg">${q}</button>`).join('')}</div>`;
+  if(!hasData){ $('#coach-log').innerHTML='<div class="msg bot">No sessions yet — import some training first.</div>'; }
+  $('#coach-send').onclick=sendCoach;
+  $('#coach-text').addEventListener('keydown',e=>{ if(e.key==='Enter') sendCoach(); });
+  $('#coach-clear').onclick=()=>{ COACH_HISTORY=[]; $('#coach-log').innerHTML='<div class="msg bot">Conversation cleared.</div>'; };
+  $$('.sugg').forEach(b=>b.onclick=()=>{ $('#coach-text').value=b.textContent; sendCoach(); });
+}
+function sendCoach(){ return streamChat($('#coach-log'),$('#coach-text'),COACH_HISTORY,{scope:'overview'},'coach-model'); }
 function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 // ── COMPARE ─────────────────────────────────────────────────────────
