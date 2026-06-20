@@ -1999,18 +1999,16 @@ def _anthropic_reply(key, model, system, messages):
 def chat():
     body = request.get_json(silent=True) or {}
     store = load_store()
-    sid = body.get("session_id")
-    if not sid or sid not in store:
-        return jsonify({"error": "session not found"}), 404
+    system, err = _chat_context(body, store)
+    if err:
+        return jsonify({"error": err[0]}), err[1]
 
     resolved = _resolve_ai(body)
     if resolved[0] is None:
-        _, err, status = resolved
-        return jsonify({"error": err}), status
+        _, msg, status = resolved
+        return jsonify({"error": msg}), status
     provider, key, model = resolved
 
-    view = build_session_view(store[sid], store)
-    system = build_context_prompt(view, store)
     messages = body.get("history", []) + [
         {"role": "user", "content": body.get("message", "")}]
 
@@ -2038,18 +2036,16 @@ def chat_stream():
     """SSE streaming variant of /api/chat (Phase 2)."""
     body = request.get_json(silent=True) or {}
     store = load_store()
-    sid = body.get("session_id")
-    if not sid or sid not in store:
-        return jsonify({"error": "session not found"}), 404
+    system, err = _chat_context(body, store)
+    if err:
+        return jsonify({"error": err[0]}), err[1]
 
     resolved = _resolve_ai(body)
     if resolved[0] is None:
-        _, err, status = resolved
-        return jsonify({"error": err}), status
+        _, msg, status = resolved
+        return jsonify({"error": msg}), status
     provider, key, model = resolved
 
-    view = build_session_view(store[sid], store)
-    system = build_context_prompt(view, store)
     messages = body.get("history", []) + [
         {"role": "user", "content": body.get("message", "")}]
 
@@ -2568,6 +2564,86 @@ inferred target={view['inferred_target']}, flags: easy={view['easy']} track={vie
 LAPS: {json.dumps(compact_laps, ensure_ascii=False)}
 
 LAST {len(history)} SAME-LABEL SESSIONS: {json.dumps(history, ensure_ascii=False)}
+"""
+
+
+def _chat_context(body, store):
+    """Pick the system prompt for a chat request.
+
+    A `session_id` → single-session context; otherwise → a cross-session
+    overview so the coach can answer trend questions ("am I improving?").
+    Returns (system_prompt, None) or (None, (error_message, status)).
+    """
+    sid = body.get("session_id")
+    if sid:
+        if sid not in store:
+            return None, ("session not found", 404)
+        return build_context_prompt(build_session_view(store[sid], store), store), None
+    return build_overview_prompt(store), None
+
+
+def build_overview_prompt(store):
+    """Cross-session context for trend / progress questions."""
+    profile = config.USER_PROFILE
+    views = sorted((build_session_view(r, store) for r in store.values()),
+                   key=lambda v: v["date_iso"])
+    if not views:
+        return ("You are a running-analysis assistant. There is no training data "
+                "imported yet — tell the user to import some FIT files first.")
+
+    weeks = compute_weekly(store).get("weeks", [])
+    weeks_compact = [{k: w.get(k) for k in
+                      ("label", "total_km", "session_count", "avg_hr", "weekly_ef",
+                       "easy_ratio", "trimp", "acwr", "weekly_sps", "wow_km_pct")}
+                     for w in weeks]
+
+    # HR @ reference pace = the headline aerobic-progress signal.
+    refpace = [{"date": v["date"], "hr": v["hr_at_ref_pace"]}
+               for v in views if v.get("hr_at_ref_pace") is not None]
+
+    # EF trend per workout type (only labels with at least two points).
+    ef_by_label = {}
+    for v in views:
+        if v["easy"] or v["ef"] is None:
+            continue
+        ef_by_label.setdefault(v["label"], []).append({"date": v["date"], "ef": v["ef"]})
+    ef_by_label = {k: vals[-8:] for k, vals in ef_by_label.items() if len(vals) >= 2}
+
+    recent = [{"date": v["date"], "label": v["label"], "km": v["km"],
+               "avg_hr": v["avg_hr"], "ef": v["ef"], "sps_i": v["sps_i"],
+               "pace_fade": v["pace_fade"], "hrr60_avg": v.get("hrr60_avg"),
+               "easy": v["easy"]} for v in views[-15:]]
+
+    mar = compute_marathon(store)
+    mar_summary = None
+    if mar.get("central"):
+        mar_summary = {
+            "central": mar["central"]["time_fmt"], "goal": mar["goal"]["time_fmt"],
+            "status": (mar["status"] or {}).get("state"),
+            "models": {m["id"]: m["time_fmt"] for m in mar["models"] if m["available"]}}
+
+    return f"""You are a running-analysis assistant for a competitive marathon runner.
+Answer questions about progress and trends ACROSS sessions (e.g. "am I improving?",
+"is my load safe?", "am I on pace for my goal?"). Be concise and direct. Ground every
+statement strictly in the data provided; if it is insufficient, say so. Trained-runner
+audience, metric units (km, mm:ss/km, bpm). Decline medical/injury diagnosis.
+When judging improvement, weigh: HR@reference-pace trend (LOWER bpm at the same pace =
+better aerobic fitness), EF trend per workout type (HIGHER = better), weekly easy ratio
+and ACWR for load/safety, and SPS for execution quality.
+
+RUNNER PROFILE: HR max {profile['hr_max']}, zone-2 ceiling {profile['zone2_hr'][1]} bpm,
+threshold HR {profile['threshold_hr']}, marathon target pace {fmt_pace(profile['marathon_target_pace'])}/km.
+DATA SPAN: {len(views)} sessions, {views[0]['date']} → {views[-1]['date']}.
+
+WEEKLY (Mon–Sun, recent): {json.dumps(weeks_compact, ensure_ascii=False)}
+
+HR @ REFERENCE PACE over time (lower = better): {json.dumps(refpace, ensure_ascii=False)}
+
+EF TREND PER WORKOUT TYPE (higher = better): {json.dumps(ef_by_label, ensure_ascii=False)}
+
+RECENT SESSIONS: {json.dumps(recent, ensure_ascii=False)}
+
+MARATHON PREDICTOR: {json.dumps(mar_summary, ensure_ascii=False)}
 """
 
 

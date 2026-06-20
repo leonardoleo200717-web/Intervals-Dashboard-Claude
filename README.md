@@ -101,6 +101,9 @@ Report settimanale Lun–Dom: card WK-01…WK-10, grafico volume giornaliero (in
 ### 🎯 Marathon
 Proiezione del tempo di maratona con un ensemble di 4 modelli (vedi [Il predittore maratona](#il-predittore-maratona)): stato Ahead / On track / Behind, grafico previsione per settimana vs obiettivo, tabella "What changed" e form **Goal & inputs** per impostare obiettivo e gara di riferimento.
 
+### 💬 AI Coach
+Chat che ragiona **su tutte le sessioni**, non su una sola: chiedi *"Sto migliorando?"*, *"Com'è il mio carico e il rischio infortuni?"*, *"Sono in linea per la maratona?"*. Il contesto inviato all'AI riassume i totali settimanali, il trend HR @ ritmo di riferimento e EF per tipo di allenamento, le ultime sessioni e la proiezione maratona, così le risposte sono basate sui tuoi numeri reali. Ci sono domande suggerite con un clic, un selettore del modello e il pulsante Clear. Richiede una chiave AI in `.env` come la chat di sessione.
+
 ---
 
 ## Flussi d'uso tipici

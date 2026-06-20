@@ -650,6 +650,25 @@ check("G27 openai payload shape",
 for v in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
     os.environ.pop(v, None)
 
+# --- cross-session AI coach context ------------------------------------
+store_now = app.load_store()
+ov = app.build_overview_prompt(store_now)
+check("G28 overview prompt has weekly + refpace", "WEEKLY" in ov and "HR @ REFERENCE" in ov)
+check("G28b overview mentions trends task", "improving" in ov.lower())
+# routing: no session_id → overview; bad id → 404; good id → single-session
+sys_ov, err_ov = app._chat_context({}, store_now)
+check("G29 no session_id → overview", err_ov is None and "trends" in sys_ov.lower())
+sys_bad, err_bad = app._chat_context({"session_id": "nope"}, store_now)
+check("G29b bad session_id → 404", err_bad == ("session not found", 404))
+sid0 = next(iter(store_now))
+sys_one, err_one = app._chat_context({"session_id": sid0}, store_now)
+check("G29c good session_id → single-session", err_one is None and "THIS SESSION" in sys_one)
+check("G30 empty store overview safe", "no training data" in app.build_overview_prompt({}).lower())
+# overview chat endpoint without a key still 503s honestly (no session_id)
+ov_chat = c.post("/api/chat", json={"message": "am i improving?"})
+check("G31 overview chat 503 no key", ov_chat.status_code == 503
+      and "AI not configured" in ov_chat.get_json().get("error", ""))
+
 # ════════════════════════════════════════════════════════════════════
 # GROUP H — Adversarial / edge / regression
 # ════════════════════════════════════════════════════════════════════
