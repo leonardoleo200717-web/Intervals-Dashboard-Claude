@@ -80,7 +80,17 @@ os.makedirs(FIT_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB — allow batch uploads
+# Per-request cap. The frontend uploads in small chunks, so this is just a
+# guard; bulk history (hundreds of files) should go through fit_files/ + Scan.
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    # Return JSON (not Flask's HTML page) so the uploader shows a clear message.
+    return jsonify({"error": "Upload too large for one request — the app uploads "
+                    "in batches; for big history copy files into fit_files/ and use "
+                    "Scan fit_files/."}), 413
 
 # Default Anthropic model for the AI chat (the spec's claude-sonnet-4-20250514
 # / Sonnet 4.0 retires 2026-06-15; this is the current Sonnet, "or newer" per

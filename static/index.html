@@ -956,20 +956,38 @@ const dz=$('#dropzone');
 ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
 dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));
 
+const UPLOAD_BATCH=20;   // files per request — keeps each POST well under the cap
 async function uploadFiles(files){
-  if(!files||!files.length) return;
-  const fd=new FormData();
-  [...files].forEach(f=>fd.append('files[]',f));
-  $('#import-results').innerHTML='<p class="muted">Uploading…</p>';
-  let data;
-  try{ data=await fetchJSON('/api/upload',{method:'POST',body:fd}); }
-  catch(e){ $('#import-results').innerHTML=`<p class="bad">${e.message||'Upload failed'}</p>`; return; }
-  finally{ $('#file-input').value=''; }  // allow re-selecting the same file
-  $('#import-results').innerHTML=(data.results||[]).map(r=>{
+  files=[...(files||[])];
+  if(!files.length) return;
+  const fits=files.filter(f=>f.name.toLowerCase().endsWith('.fit'));
+  const nonFit=files.filter(f=>!f.name.toLowerCase().endsWith('.fit'));
+  const results=nonFit.map(f=>({file:f.name,status:'skipped: not a .fit file'}));
+  const res=$('#import-results');
+  let done=0, failedBatches=0;
+  for(let i=0;i<fits.length;i+=UPLOAD_BATCH){
+    const batch=fits.slice(i,i+UPLOAD_BATCH);
+    res.innerHTML=`<p class="muted">Uploading… ${done}/${fits.length}</p>`;
+    const fd=new FormData();
+    batch.forEach(f=>fd.append('files[]',f));
+    try{
+      const data=await fetchJSON('/api/upload',{method:'POST',body:fd});
+      (data.results||[]).forEach(r=>results.push(r));
+    }catch(e){
+      failedBatches++;
+      batch.forEach(f=>results.push({file:f.name,status:'error: '+(e.message||'upload failed')}));
+    }
+    done+=batch.length;
+  }
+  $('#file-input').value='';  // allow re-selecting the same file
+  const counts={ok:0,duplicate:0,other:0};
+  results.forEach(r=>{ counts[r.status==='ok'?'ok':r.status==='duplicate'?'duplicate':'other']++; });
+  const summary=`<p><b>${counts.ok}</b> added · <b>${counts.duplicate}</b> duplicate · <b>${counts.other}</b> skipped/error${failedBatches?` · ${failedBatches} batch(es) failed`:''}</p>`;
+  res.innerHTML=summary+results.map(r=>{
     const ok=r.status==='ok'; const dup=r.status==='duplicate';
     const cls=ok?'good':dup?'warn':'bad';
     return `<div class="result-line"><span>${r.file}</span><span class="${cls}">${r.status}</span></div>`;
-  }).join('')||`<p class="bad">${data.error||'Upload failed'}</p>`;
+  }).join('');
   await refreshAll();
 }
 
