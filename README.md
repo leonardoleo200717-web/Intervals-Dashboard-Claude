@@ -126,9 +126,11 @@ La struttura viene riconosciuta, **in ordine di affidabilità**, da:
 2. **Struttura digitata** da te nel riquadro Override (es. `5x5'`, `10x90"`, `5x4km p1'`).
 3. **Marker di intensità del Garmin** registrati in ogni lap (warm-up / active / rest / cool-down): se hai seguito un allenamento strutturato sull'orologio, ogni lap è già etichettato alla fonte — drill, warm-up e cool-down esclusi senza indovinare dal ritmo (badge *"from Garmin lap markers"*).
 4. **Convenzione di denominazione** nel titolo dell'attività.
-5. **Euristica sul ritmo** come ultima spiaggia.
+5. **Euristica sul ritmo** come ultima spiaggia — basata su **cluster di passo** (gruppo veloce = ripetute, gruppo lento = resto), quindi regge anche recuperi da fermo, float veloci e doppi blocchi tipo `2×(5×300)`. Le **salite** (ripetuta in salita = passo lento!) vengono riconosciute tramite la frequenza cardiaca: se i lap "attivi" hanno HR chiaramente più bassa dei "recuperi", la classificazione viene invertita. Corse continue o progressive senza alternanza veloce/lento restituiscono 0 ripetute (un blocco unico ≥ 3 km diventa `Tempo X km`).
 
-Warm-up e cool-down sono **sempre** esclusi. Formati accettati nell'Override: minuti `5'`, secondi `90"`, mm:ss `1:30`, km `4km`, metri `400m`, con recupero opzionale `p1'`/`r400m`/`rec200m`.
+Warm-up e cool-down sono **sempre** esclusi. Formati accettati nel titolo o nell'Override: minuti `5'`, secondi `90"`, mm:ss `1:30` o `3'30"`, km `4km`, metri `400m`, blocchi `2x5x300` (= 10×300 m), con recupero opzionale `p1'` / `r400m` / `rec200m` / `riposo 90"` / `pausa 1'` / `2' di recupero`. Attenzione: un numero senza unità ≤ 60 è letto come **minuti** (`10x30` = 30 min; per 30 secondi scrivi `10x30"`). Se il titolo contiene più serie (`10x100m + 5x200m`) viene usata solo la prima e compare un avviso.
+
+> **Titolo con export manuale:** l'esportazione manuale da Garmin Connect ("Esporta originale") **non** contiene il titolo dell'attività — quello arriva solo via `garmin_sync.py` (file `.meta.json`). Per i FIT esportati a mano puoi **rinominare il file** (es. `5x1200m_12345678.fit`): anche il nome file viene letto. Oppure usa la casella Override.
 
 ### Autolap spezzato
 Se avevi l'autolap attivo (es. lap automatico ogni 1000 m) **e** premevi il pulsante a fine ripetuta, una singola ripetuta finisce registrata come due lap (1000 m + 200 m). Quando **dichiari il target** (titolo o Override, es. `5x1200m`) la dashboard li **ricongiunge** nell'unica ripetuta da 1200 m — durata sommata, HR pesata sul tempo — e la marca con ⛓ in tabella. Funziona solo col target dichiarato; non tocca le sessioni senza struttura e non unisce mai i drill.
@@ -152,7 +154,7 @@ Tutte le formule e le soglie vivono in `config.py`. Unità metriche ovunque (km,
 | ID | Nome | Formula | Target | Come leggerlo |
 |---|---|---|---|---|
 | **KPI-01** | Efficiency Factor (EF) | `velocità (m/min) / HR media` | trend in salita | Indice di Friel. **Monotòno: più alto = meglio** (più veloce a parità di HR, o stesso ritmo a HR più bassa). |
-| **KPI-02** | Aerobic Decoupling | `(EF_1ªmetà − EF_2ªmetà) / EF_1ªmetà × 100` | < 5% | **Solo sessioni steady** (fondi, tempo continui). Quanto "deriva" l'HR a ritmo costante. Sulle ripetute è soppresso (la deriva è voluta). |
+| **KPI-02** | Aerobic Decoupling | `(EF_1ªmetà − EF_2ªmetà) / EF_1ªmetà × 100` | < 5% | **Solo sessioni steady**: fondi marcati Easy **e** corse continue/tempo non marcate (≤ 1 blocco rilevato). Quanto "deriva" l'HR a ritmo costante. Sulle ripetute è soppresso (la deriva è voluta). |
 | **KPI-03** | SPS-T | `Σ pesi × punteggi_k` con target teorico | > 75 | Session Performance Score sul **tuo** target. Null finché non imposti il target. |
 | **KPI-04** | SPS-I | come SPS-T ma con target inferito (mediana ripetute) | > 75 | Sempre calcolabile; voto di esecuzione "auto-tarato". |
 | **KPI-05** | Pace Fade | `(ritmo_ultima − ritmo_prima) / ritmo_prima × 100` | < +2% | **Solo ripetute.** Positivo = stai rallentando rep dopo rep. Segnale primario di esecuzione. |
@@ -169,8 +171,8 @@ Calcolati sui lap **attivi**; i recuperi mostrano solo distanza, durata, HR e HR
 | **LAP-01** | Pace | `durata / (distanza/1000)` |
 | **LAP-02** | Avg HR | dal FIT |
 | **LAP-03** | EA per lap | `ritmo / HR media` |
-| **LAP-04** | HRR60 (Heart-Rate Recovery) | `HR a fine ripetuta − HR 60 s dopo`, dalla traccia secondo-per-secondo · > 25 bpm buono, 15–25 ok, < 15 flag |
-| **LAP-04b** | RQS (fallback) | `HR lap di recupero / HR lap attivo precedente × 100` — usato **solo** quando manca la traccia secondo-per-secondo |
+| **LAP-04** | HRR60 (Heart-Rate Recovery) | `HR a fine ripetuta − HR 60 s dopo`, dalla traccia secondo-per-secondo · > 25 bpm buono, 15–25 ok, < 15 flag. Misurato **solo se passano ≥ 60 s prima della ripetuta successiva** — con recuperi più corti si usa il fallback RQS (campionare dentro lo sforzo seguente falserebbe il valore) |
+| **LAP-04b** | RQS (fallback) | `HR lap di recupero / HR lap attivo precedente × 100` — usato quando manca la traccia secondo-per-secondo o il recupero dura meno di 60 s |
 | **LAP-05** | Cardiac Cost | `HR attiva − HR del recupero precedente` |
 | **LAP-06** | Δ vs target teorico | `(ritmo − target)/target × 100` |
 | **LAP-07** | Δ vs target inferito | come sopra ma vs mediana di sessione |

@@ -874,6 +874,105 @@ check("I22 settings PATCH applies", patched.status_code == 200 and pj["goal_pace
       and pj["race"]["distance_m"] == 10000, pj)
 
 
+# ════════════════════════════════════════════════════════════════════
+# GROUP J — Review fixes (heuristic clusters, titles, HRR60 window, dt zones)
+# ════════════════════════════════════════════════════════════════════
+section("J. Review fixes")
+
+
+def _actives(laps, spec=None):
+    out, _ = app.detect_intervals(laps, True, spec)
+    return sum(1 for l in out if l["type"] == "active")
+
+
+# J1: standing rests no longer eat the warm-up (old global-mean bug)
+j1 = [lap(2500, 780, 130)] + sum([[lap(1000, 215, 178), lap(100, 120, 120)] for _ in range(6)], []) + [lap(1000, 330, 125)]
+check("J1 standing rests → 6 reps", _actives(j1) == 6, _actives(j1))
+
+# J2: fast floats (4:10 vs 3:45) no longer collapse the session to all-WU
+j2 = [lap(2000, 600, 130)] + sum([[lap(400, 90, 175), lap(400, 100, 160)] for _ in range(8)], []) + [lap(1500, 480, 125)]
+check("J2 fast floats → 8 reps", _actives(j2) == 8, _actives(j2))
+
+# J3: hill repeats — hard-up laps are SLOW; HR-inversion rescue flips them
+j3 = [lap(2000, 600, 130)] + sum([[lap(300, 105, 178), lap(300, 80, 150)] for _ in range(8)], []) + [lap(1500, 480, 125)]
+o3, _ = app.detect_intervals(j3, True, None)
+ups_active = all(o3[i]["type"] == "active" for i in range(1, 17, 2))
+check("J3 hill reps → 8 uphill reps", _actives(j3) == 8 and ups_active,
+      [l["type"] for l in o3])
+
+# J4: two blocks 2x(5x300) with inter-block jog, no spec
+j4 = [lap(2000, 600, 130)] + sum([[lap(300, 58, 174), lap(100, 60, 140)] for _ in range(5)], []) + \
+     [lap(600, 240, 130)] + sum([[lap(300, 57, 176), lap(100, 60, 141)] for _ in range(5)], []) + [lap(1500, 480, 125)]
+check("J4 2x(5x300) → 10 reps", _actives(j4) == 10, _actives(j4))
+
+# J5: progressive run and even-pace run → 0 reps (steady guard)
+j5 = [lap(1000, 280, 140), lap(1000, 270, 145), lap(1000, 260, 150),
+      lap(1000, 250, 155), lap(1000, 240, 162), lap(1000, 230, 168)]
+check("J5 progressive run → 0 reps", _actives(j5) == 0, _actives(j5))
+check("J5b even easy run → 0 reps", _actives([lap(2000, 570, 138)] * 6) == 0)
+
+# J6: title parser — blocks, compound times, italian recovery words
+j6 = app.parse_structure_string("2x5x300")
+check("J6 blocks 2x5x300 → 10×300m", j6 and j6["rep_count"] == 10 and j6["rep_target"] == 300
+      and j6["itype"] == "distance", j6)
+j6b = app.parse_structure_string("4x3'30\"")
+check("J6b compound 3'30\" → 210s", j6b and j6b["itype"] == "time" and j6b["rep_target"] == 210, j6b)
+j6c = app.parse_structure_string("5x1000 riposo 90\"")
+check("J6c riposo 90\" recovery", j6c and j6c["recovery_target"] == 90 and j6c["recovery_itype"] == "time", j6c)
+j6d = app.parse_structure_string("5x1000 con 2' di recupero")
+check("J6d value-before-marker recovery", j6d and j6d["recovery_target"] == 120, j6d)
+j6e = app.parse_structure_string("4x2000 p.1'30\"")
+check("J6e p.1'30\" recovery → 90s", j6e and j6e["recovery_target"] == 90, j6e)
+check("J6f 'Tempo super 2'' is NOT a structure", app.parse_structure_string("Tempo super 2'") is None)
+j6g = app.parse_structure_string("10x100m + 5x200m")
+check("J6g mixed sets flagged", j6g and j6g.get("mixed_sets") is True, j6g)
+
+# J7: HRR60 not computed when the next rep starts < 60 s after the rep ends
+j7_laps = [lap(2000, 600, 130), lap(400, 90, 176), lap(100, 40, 150),
+           lap(400, 90, 177), lap(300, 120, 140)]
+offs = 0
+for l in j7_laps:
+    l["start_offset_s"] = offs
+    offs += l["duration_s"]
+j7_trace = [{"t": t, "hr": 150} for t in range(0, int(offs) + 70)]
+j7 = app.build_session_view(synth_record("j7", j7_laps, trace=j7_trace), {})
+reps = [l for l in j7["laps"] if l["type"] == "active"]
+check("J7 short rest → HRR60 None on rep 1", len(reps) == 2 and reps[0]["hrr60"] is None,
+      [r.get("hrr60") for r in reps])
+check("J7b full rest → HRR60 computed on rep 2", reps[1]["hrr60"] is not None,
+      reps[1].get("hrr60"))
+
+# J8: dt-weighted zones — smart recording (5 s spacing) counts real seconds
+smart = [{"t": t * 5, "hr": 150} for t in range(60)]
+zs, below, tot = app._zone_breakdown(smart)
+check("J8 smart trace ≈ 300 s not 60", 290 <= tot <= 300, tot)
+check("J8b zone sum == total", abs(sum(zs) - tot) < 1e-6, (sum(zs), tot))
+
+# J9: decoupling on an unflagged tempo run (≤1 rep), still None on intervals
+j9 = app.build_session_view(synth_record("j9", [lap(2000, 620, 130), lap(8000, 1880, 168), lap(1500, 470, 125)]), {})
+check("J9 tempo run gets decoupling", j9["decoupling"] is not None, j9["decoupling"])
+check("J9b tempo run label", j9["label"].startswith("Tempo"), j9["label"])
+j9c = app.build_session_view(synth_record("j9c", interval_laps(5, 400, 90)), {})
+check("J9c interval session decoupling stays None", j9c["decoupling"] is None)
+
+# J10: race-anchor exclusions — >45 min rep and whole-run heuristic "rep"
+long_block = {"j10": synth_record("j10", [lap(2000, 600, 130), lap(14000, 2900, 165), lap(1000, 330, 125)])}
+check("J10 >45min block not an anchor", app.compute_race_predictions(long_block) is None)
+ok_block = {"j10b": synth_record("j10b", [lap(2000, 600, 130), lap(8000, 1780, 170), lap(1000, 330, 125)])}
+pred = app.compute_race_predictions(ok_block)
+check("J10b 30min tempo IS an anchor", pred is not None and pred["anchor"]["distance_m"] == 8000,
+      pred and pred["anchor"])
+
+# J11: changing the structure clears saved per-lap overrides
+j11_store = app.load_store()
+j11_store["j11"] = synth_record("j11", interval_laps(5, 400, 90))
+app.save_store(j11_store)
+c.patch("/api/sessions/j11", json={"lap_types": {"1": "drill"}})
+check("J11 override saved", app.load_store()["j11"]["lap_types"] == {"1": "drill"})
+c.patch("/api/sessions/j11", json={"structure": "5x400m"})
+check("J11b structure change clears overrides", app.load_store()["j11"]["lap_types"] == {})
+
+
 # ── report ───────────────────────────────────────────────────────────
 passed = sum(1 for _, ok, _ in RESULTS if ok is True)
 failed = [(n, d) for n, ok, d in RESULTS if ok is False]
