@@ -692,9 +692,9 @@ function structureBox(s){
     <div class="structure-head"><b>Detected set:</b> ${s.label||'—'}
       <span class="src-badge src-${s.structure_source}">${sourceLabel(s.structure_source)}</span></div>
     <label class="struct-label">Override structure
-      <input id="struct-input" class="target-input wide" placeholder="e.g. 5x5' or 5x4km p1'" value="${s.structure||''}"></label>
+      <input id="struct-input" class="target-input wide" placeholder="e.g. 5x5' or 5x4km p1'" value="${escapeHtml(String(s.structure||''))}"></label>
     <p class="muted small">Type the planned set to force detection (warm-up and cool-down are always excluded). Examples:
-      <code>10x400m</code> · <code>5x5'</code> · <code>10x90"</code> · <code>5x4km p1'</code>.
+      <code>10x400m</code> · <code>5x5'</code> · <code>10x90"</code> · <code>2x5x300</code> · <code>5x4km p1'</code>. Bare numbers ≤ 60 read as minutes — write <code>30"</code> for 30-second reps.
       Declaring the target also rejoins reps an autolap split mid-effort (e.g. a 1000 m + 200 m become one 1200 m rep, marked ⛓).
       Or fix any single lap with the Type dropdown in the table below.${title?` Garmin title: <i>${escapeHtml(String(title))}</i>.`:''}</p>
   </div>`;
@@ -822,7 +822,7 @@ function renderCoach(){
   $$('.sugg').forEach(b=>b.onclick=()=>{ $('#coach-text').value=b.textContent; sendCoach(); });
 }
 function sendCoach(){ return streamChat($('#coach-log'),$('#coach-text'),COACH_HISTORY,{scope:'overview'},'coach-model'); }
-function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function escapeHtml(s){ return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // ── COMPARE ─────────────────────────────────────────────────────────
 const CMP_COLORS=['#1D9E75','#2f73c4','#7a52c4','#e0972a'];

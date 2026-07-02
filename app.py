@@ -534,22 +534,46 @@ def _merge_stub_laps(laps):
     return cleaned
 
 
+def _sample_weights(times):
+    """Seconds each sample covers: the gap to the next sample, capped at 10 s.
+
+    Garmin 'smart recording' stores a point every ~3–7 s, so counting samples
+    as seconds undercounts time-in-zone / TRIMP several-fold on those files.
+    The cap keeps pauses (watch stopped) from inflating a single sample.
+    """
+    w = []
+    for i, t in enumerate(times):
+        if i + 1 < len(times):
+            dt = times[i + 1] - t
+            w.append(1 if dt <= 0 else min(dt, 10))
+        else:
+            w.append(1)
+    return w
+
+
 def _hr_at_reference_pace(paced):
     """Mean HR over trace seconds whose pace falls in REFERENCE_PACE_BAND.
 
     Requires >= 3 min in-band, else returns (None, seconds_in_band).
+    Samples are dt-weighted so smart-recording traces count real seconds.
     """
     lo, hi = config.REFERENCE_PACE_BAND
-    hrs = [hr for (_t, hr, pace) in paced if lo <= pace <= hi]
-    if len(hrs) >= 180:
-        return round(statistics.mean(hrs), 1), len(hrs)
-    return None, len(hrs)
+    weights = _sample_weights([t for (t, _hr, _p) in paced])
+    num = den = 0.0
+    for (t, hr, pace), w in zip(paced, weights):
+        if lo <= pace <= hi:
+            num += hr * w
+            den += w
+    if den >= 180:
+        return round(num / den, 1), int(den)
+    return None, int(den)
 
 
 def _zone_breakdown(trace):
     """Return (zone_seconds[5], seconds_below_zone2, total_seconds).
 
-    Zones from HR_ZONES fractions of hr_max. Assumes ~1 Hz trace.
+    Zones from HR_ZONES fractions of hr_max. Samples are dt-weighted, so
+    smart-recording traces (one point every few seconds) count real seconds.
     """
     hr_max = config.USER_PROFILE["hr_max"]
     # HR_ZONES holds 6 fractional boundaries → 5 zones (consecutive pairs).
@@ -558,19 +582,20 @@ def _zone_breakdown(trace):
     zone_seconds = [0] * len(uppers)
     below_z2 = 0
     z2_ceiling = config.USER_PROFILE["zone2_hr"][1]
-    for pt in trace:
+    weights = _sample_weights([pt["t"] for pt in trace])
+    for pt, w in zip(trace, weights):
         hr = pt["hr"]
         if hr < z2_ceiling:
-            below_z2 += 1
+            below_z2 += w
         placed = False
         for i, ub in enumerate(uppers):
             if hr < ub:
-                zone_seconds[i] += 1
+                zone_seconds[i] += w
                 placed = True
                 break
         if not placed:
-            zone_seconds[-1] += 1
-    return zone_seconds, below_z2, len(trace)
+            zone_seconds[-1] += w
+    return zone_seconds, below_z2, sum(weights)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -578,16 +603,33 @@ def _zone_breakdown(trace):
 # ════════════════════════════════════════════════════════════════════
 import re
 
+_UNIT = r"'|\"|min(?:ute)?s?|sec(?:ond)?s?|s|m\b|km|k|metri|metres?|meters?"
 _DUR_RE = re.compile(
     r"(?P<n>\d+)\s*[x×]\s*"                       # rep count, e.g. 5x
     r"(?P<val>\d+(?:[.:]\d+)?)\s*"                # value, e.g. 5 / 1.5 / 1:30
-    r"(?P<unit>'|\"|min(?:ute)?s?|sec(?:ond)?s?|s|m\b|km|k|metri|metres?|meters?)?",
+    r"(?P<unit>" + _UNIT + r")?",
     re.IGNORECASE)
-_REC_RE = re.compile(
-    r"(?:p|r|rec(?:upero|overy)?|rest)\s*"        # recovery marker p / r / rec
+# 2x(5x300): block notation → n·m reps of the value.
+_BLOCK_RE = re.compile(
+    r"(?P<blocks>\d+)\s*[x×]\s*\(?\s*(?P<n>\d+)\s*[x×]\s*"
     r"(?P<val>\d+(?:[.:]\d+)?)\s*"
-    r"(?P<unit>'|\"|min(?:ute)?s?|sec(?:ond)?s?|s|m\b|km|k|metri|metres?|meters?)?",
+    r"(?P<unit>" + _UNIT + r")?",
     re.IGNORECASE)
+# Recovery, marker first: "rec 2'", "p1'", "r400m", "riposo 90\"", "rest 2min".
+# \b keeps the single-letter markers from matching inside words ("super 2'").
+_REC_RE = re.compile(
+    r"\b(?:rec(?:upero|overy)?|rest|riposo|pausa|p|r)[\s.:=]*"
+    r"(?P<val>\d+(?:[.:]\d+)?)\s*"
+    r"(?P<unit>" + _UNIT + r")?",
+    re.IGNORECASE)
+# Recovery, value first: "2' di recupero", "400m rest".
+_REC_RE_POST = re.compile(
+    r"(?P<val>\d+(?:[.:]\d+)?)\s*"
+    r"(?P<unit>" + _UNIT + r")?\s*"
+    r"(?:di\s+|of\s+)?(?:rec(?:upero|overy)?|rest|riposo|pausa)\b",
+    re.IGNORECASE)
+# 3'30" style compound minute-second values → normalised to 3:30 pre-parse.
+_COMPOUND_RE = re.compile(r"(\d+)\s*'\s*(\d{1,2})\s*(?:\"|'')?")
 
 
 def _value_to_seconds_or_meters(val, unit):
@@ -616,11 +658,22 @@ def _value_to_seconds_or_meters(val, unit):
 def parse_structure_string(text):
     """Parse a naming-convention string like '5x5'', '10x90\"', '5x4km p1''.
 
-    Returns a spec dict or None. Tolerant of warmup/cooldown words around it.
+    Also handles block notation ('2x5x300' → 10 reps of 300 m), compound
+    minute-second values ('4x3'30\"'), and recovery phrased either way
+    ('rec 2'', 'riposo 90\"', '2' di recupero'). Returns a spec dict or None.
+    Tolerant of warmup/cooldown words around it.
     """
     if not text:
         return None
-    m = _DUR_RE.search(text)
+    # Normalise 3'30" compounds to 3:30 so the value regexes see mm:ss.
+    text = _COMPOUND_RE.sub(r"\1:\2", str(text))
+
+    blocks = 1
+    m = _BLOCK_RE.search(text)
+    if m:
+        blocks = int(m.group("blocks"))
+    else:
+        m = _DUR_RE.search(text)
     if not m:
         return None
     kind, amount = _value_to_seconds_or_meters(m.group("val"), m.group("unit"))
@@ -628,13 +681,18 @@ def parse_structure_string(text):
         return None
     spec = {
         "itype": kind,
-        "rep_count": int(m.group("n")),
+        "rep_count": blocks * int(m.group("n")),
         "rep_target": amount,
         "recovery_target": None,
         "recovery_itype": None,
         "source": "name",
     }
-    rm = _REC_RE.search(text[m.end():])
+    rest = text[m.end():]
+    # A second NxV group after the first means a mixed set the parser cannot
+    # fully express — flag it so the UI can warn instead of silently dropping.
+    if _DUR_RE.search(rest):
+        spec["mixed_sets"] = True
+    rm = _REC_RE.search(rest) or _REC_RE_POST.search(rest)
     if rm:
         rkind, ramount = _value_to_seconds_or_meters(rm.group("val"), rm.group("unit"))
         if rkind is not None:
@@ -922,19 +980,45 @@ def _classify_with_spec(out, spec):
 
 
 def _classify_heuristic(out):
-    """Legacy pace-ratio fallback when no structure is known."""
+    """Pace-cluster fallback when no structure is known.
+
+    The old rule (threshold = global mean pace × 0.85) broke whenever the
+    recoveries distorted the mean: standing rests (20:00/km) pushed the mean so
+    high the warm-up looked like a rep, and fast floats pulled it so low that
+    nothing qualified and the whole session became warm-up. Instead, split the
+    laps into a fast cluster (reps) and a slow cluster (everything else) and
+    derive the threshold from the clusters themselves.
+    """
     n = len(out)
     for lp in out:
         lp["type"] = "active"
     paces = [pace_sec_km(lp["distance_m"], lp["duration_s"]) for lp in out]
-    valid = [p for p in paces if p is not None]
+    valid = sorted(p for p in paces if p is not None)
     if not valid:
         return
-    mean_pace = statistics.mean(valid)
-    factor = config.DETECTION["active_pace_factor"]
+
+    k = max(1, len(valid) // 3)
+    fast_med = statistics.median(valid[:k])       # median of the fastest third
+    slow_med = statistics.median(valid[-k:])      # median of the slowest third
+
+    # Steady-run guard: little pace contrast AND no fast/slow alternation means
+    # a continuous or progressive run, not intervals — leave 0 active reps.
+    deltas = [(paces[i], paces[i + 1]) for i in range(n - 1)
+              if paces[i] is not None and paces[i + 1] is not None]
+    signs = [1 if b > a * 1.03 else -1 if a > b * 1.03 else 0 for a, b in deltas]
+    meaningful = [s for s in signs if s]
+    alternations = sum(1 for a, b in zip(meaningful, meaningful[1:]) if a != b)
+    if slow_med < fast_med * 1.2 and alternations < 3:
+        for lp in out:
+            lp["type"] = "wu"
+        return
+
+    # Reps sit near fast_med. A lap is "not a rep" when it is meaningfully
+    # slower than the rep cluster — but never past the fast/slow midpoint
+    # (handles floats barely 10% slower than the reps).
+    threshold = min(fast_med * 1.25, (fast_med + slow_med) / 2.0)
 
     # Step 1 — warm-up / cool-down: slow laps at the extremities.
-    threshold = mean_pace * factor
     first_fast = 0
     while first_fast < n and (paces[first_fast] is None or paces[first_fast] > threshold):
         out[first_fast]["type"] = "wu"
@@ -961,8 +1045,26 @@ def _classify_heuristic(out):
             out[nxt]["type"] = "recovery"
             i += 2
         else:
-            out[idx]["type"] = "active" if p <= mean_pace else "recovery"
+            out[idx]["type"] = "active" if p <= threshold else "recovery"
             i += 1
+
+    _fix_inverted_effort(out)
+
+
+def _fix_inverted_effort(out):
+    """Hill-repeat rescue: on hills the hard laps are the SLOW ones (uphill),
+    so pace-only classification comes out inverted. When HR says the "active"
+    laps were clearly the easier ones, swap active ↔ recovery."""
+    act_hr = [lp["hr_avg"] for lp in out if lp["type"] == "active" and lp.get("hr_avg")]
+    rec_hr = [lp["hr_avg"] for lp in out if lp["type"] == "recovery" and lp.get("hr_avg")]
+    if len(act_hr) < 2 or len(rec_hr) < 2:
+        return
+    if statistics.mean(act_hr) + 5 < statistics.mean(rec_hr):
+        for lp in out:
+            if lp["type"] == "active":
+                lp["type"] = "recovery"
+            elif lp["type"] == "recovery":
+                lp["type"] = "active"
 
 
 def _classify_interval_type(classified):
@@ -1181,6 +1283,10 @@ def build_session_view(record, store):
                                          record.get("lap_types"))
     view["itype"] = itype
     actives = [lp for lp in classified if lp["type"] == "active"]
+    if spec and spec.get("mixed_sets"):
+        view["warnings"].append(
+            "Title describes multiple sets — only the first one drives detection; "
+            "fix individual laps with the Type dropdown if needed")
 
     # historical same-label EA median for EF/EA scoring
     label_guess = None  # computed below; for scoring we use itype + count later
@@ -1229,11 +1335,20 @@ def build_session_view(record, store):
             lv["cardiac_cost"] = (int(lp["hr_avg"] - prev_hr)
                                   if (lp.get("hr_avg") and prev_hr) else None)
 
-            # HRR60 (LAP-04) from trace, else RQS (LAP-04b)
+            # HRR60 (LAP-04) from trace, else RQS (LAP-04b).
+            # Only measurable when a full 60 s passes before the next rep —
+            # sampling inside the following effort would understate recovery.
             hrr60 = None
             rqs = None
             end_t = lp.get("start_offset_s", 0) + lp["duration_s"]
-            if trace:
+            next_active_start = None
+            for j in range(i + 1, len(classified)):
+                if classified[j]["type"] == "active":
+                    next_active_start = classified[j].get("start_offset_s", 0)
+                    break
+            rest_window = (next_active_start - end_t
+                           if next_active_start is not None else float("inf"))
+            if trace and rest_window >= 60:
                 hr_end = hr_at_time(trace, end_t)
                 hr_later = hr_at_time(trace, end_t + 60)
                 if hr_end is not None and hr_later is not None:
@@ -1284,6 +1399,12 @@ def build_session_view(record, store):
         lap_views.append(lv)
 
     view["laps"] = lap_views
+
+    # KPI-02 applies to steady sessions: easy runs (handled above) AND
+    # continuous/tempo runs that produced at most one detected rep. True
+    # interval sessions keep decoupling suppressed (HR drift is intentional).
+    if len(actives) <= 1:
+        view["decoupling"] = compute_decoupling(record["laps"])
 
     # --- session label ---------------------------------------------------
     view["label"] = _build_label(actives, itype, track, spec)
@@ -1442,6 +1563,14 @@ def _build_label(actives, itype, track, spec=None):
     n = len(actives)
     if n == 0:
         return "Run"
+    # A single long block with no declared structure is a tempo run, not
+    # "1×8000 m" — label it as such.
+    if n == 1 and not (spec and spec.get("rep_count")):
+        d, t = actives[0]["distance_m"], actives[0]["duration_s"]
+        if itype == "time" and t >= 480:
+            return f"Tempo {round(t / 60)} min"
+        if itype != "time" and d >= 3000:
+            return f"Tempo {d / 1000.0:.1f} km"
     # When the planned structure is known, label from it — exact and clean
     # (e.g. "5×4 km" instead of a rounded "5×4002 m").
     if spec and spec.get("rep_count") and spec.get("rep_target"):
@@ -1748,7 +1877,12 @@ def api_patch_session(sid):
     if "theoretical_target" in body:
         rec["theoretical_target"] = body["theoretical_target"] or None
     if "structure" in body:
-        rec["structure"] = (body["structure"] or "").strip() or None
+        new_structure = (body["structure"] or "").strip() or None
+        if new_structure != rec.get("structure"):
+            # A different structure can re-stitch laps and shift indices, so
+            # saved per-lap overrides would land on the wrong rows.
+            rec["lap_types"] = {}
+        rec["structure"] = new_structure
     if "lap_types" in body:
         lt = body["lap_types"] or {}
         if isinstance(lt, dict):
@@ -2160,24 +2294,41 @@ def _riegel(t1, d1, d2):
     return t1 * (d2 / d1) ** RIEGEL_EXPONENT
 
 
-def compute_race_predictions(store):
-    """Project race times from the best long hard effort in the data.
+def _effort_candidates(store, as_of_iso=None):
+    """Hard continuous efforts usable as race-equivalent anchors.
 
-    Anchors on the longest active rep (≥ 1000 m) across non-easy sessions —
-    longer efforts extrapolate to the marathon far more reliably than 400s.
-    Returns None when there is no usable anchor.
+    (distance_m, duration_s, date_iso, date, label) per qualifying active rep
+    (≥ 1000 m). Excluded: reps longer than 45 min, and a lone heuristic "rep"
+    spanning most of an unstructured run — that is a continuous training run
+    the detector wrapped in one lap, not a race effort.
     """
-    candidates = []  # (distance_m, duration_s, date_iso, date, label)
+    out = []
     for r in store.values():
         if r.get("easy"):
             continue
+        if as_of_iso and (r.get("date_iso") or "") > as_of_iso:
+            continue
         view = build_session_view(r, store)
-        for lp in view["laps"]:
-            if lp["type"] != "active":
-                continue
+        acts = [lp for lp in view["laps"] if lp["type"] == "active"]
+        declared = view.get("structure_source") in ("manual", "workout", "name", "garmin")
+        for lp in acts:
             d, t = lp.get("distance_m"), lp.get("duration_s")
-            if d and t and d >= 1000 and t > 0:
-                candidates.append((d, t, view["date_iso"], view["date"], view["label"]))
+            if not d or not t or d < 1000 or t <= 0 or t > 45 * 60:
+                continue
+            if len(acts) == 1 and not declared and d > 0.8 * view["km"] * 1000:
+                continue
+            out.append((d, t, view["date_iso"], view["date"], view["label"]))
+    return out
+
+
+def compute_race_predictions(store):
+    """Project race times from the best long hard effort in the data.
+
+    Anchors on the longest qualifying effort (≥ 1000 m) across non-easy
+    sessions — longer efforts extrapolate to the marathon far more reliably
+    than 400s. Returns None when there is no usable anchor.
+    """
+    candidates = _effort_candidates(store)
     if not candidates:
         return None
 
@@ -2333,19 +2484,10 @@ def _race_anchor(store, settings, as_of_iso=None):
                 "source": "race", "is_real_race": True}
 
     best = None
-    for r in store.values():
-        if r.get("easy") or not ok_date(r.get("date_iso")):
-            continue
-        view = build_session_view(r, store)
-        for lp in view["laps"]:
-            if lp["type"] != "active":
-                continue
-            d, t = lp.get("distance_m"), lp.get("duration_s")
-            if d and t and d >= 1000 and t > 0:
-                cand = {"distance_m": d, "time_s": t, "date": view["date_iso"],
-                        "name": view["label"], "source": "effort", "is_real_race": False}
-                if best is None or d > best["distance_m"]:
-                    best = cand
+    for d, t, date_iso, _date, label in _effort_candidates(store, as_of_iso):
+        if best is None or d > best["distance_m"]:
+            best = {"distance_m": d, "time_s": t, "date": date_iso,
+                    "name": label, "source": "effort", "is_real_race": False}
     return best
 
 
